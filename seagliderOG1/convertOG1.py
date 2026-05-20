@@ -18,7 +18,10 @@ from seagliderOG1 import readers, tools, utilities, vocabularies, writers
 _log = logging.getLogger(__name__)
 
 
-def convert_to_OG1(list_of_datasets: list[xr.Dataset] | xr.Dataset, contrib_to_append: dict[str, str] | None = None,) -> tuple[xr.Dataset, list[str]]:
+def convert_to_OG1(
+    list_of_datasets: list[xr.Dataset] | xr.Dataset,
+    contrib_to_append: dict[str, str] | None = None,
+) -> tuple[xr.Dataset, list[str]]:
     """Convert Seaglider basestation datasets to OG1 format.
     Processes a list of xarray datasets or a single xarray dataset, converts them to OG1 format,
     concatenates the datasets, sorts by time, and applies attributes. Main conversion function that
@@ -51,7 +54,7 @@ def convert_to_OG1(list_of_datasets: list[xr.Dataset] | xr.Dataset, contrib_to_a
     # But we need to process them first to get the dive number, assign GPS (could be after), ?
     for ds1_base in tqdm(list_of_datasets, desc="Processing datasets", unit="dataset"):
         varlist = list(set(varlist + list(ds1_base.variables)))
-        ds_new, attr_warnings, sg_cal, dc_other, dc_log = process_dataset(
+        ds_new, attr_warnings = process_dataset(
             ds1_base, firstrun
         )
         if ds_new:
@@ -64,6 +67,8 @@ def convert_to_OG1(list_of_datasets: list[xr.Dataset] | xr.Dataset, contrib_to_a
 
     ds_og1 = xr.concat(processed_datasets, dim="N_MEASUREMENTS")
     ds_og1 = ds_og1.sortby("TIME")
+    # Change format of time into datetime64[ns] to avoid problems with attributes and writing to netcdf
+    # ds_og1["TIME"] = (ds_og1["TIME"].astype("float64") * 1e9).astype("datetime64[ns]")
 
     # Change format of time into datetime64[ns] to avoid problems with attributes and writing to netcdf
     ds_og1['TIME'] = (ds_og1['TIME'].astype('float64') * 1e9).astype('datetime64[ns]')
@@ -74,6 +79,10 @@ def convert_to_OG1(list_of_datasets: list[xr.Dataset] | xr.Dataset, contrib_to_a
     )
     for key, value in ordered_attributes.items():
         ds_og1.attrs[key] = value
+
+    ### Add information needed/used for hydrodynamic (flight) model (hdm)
+    hdm_parameters = tools.extract_hdm_parameters(list_of_datasets)
+    ds_og1 = tools.add_hdm_parameters(ds_og1, hdm_parameters)
 
     # Construct the platform serial number
     if "platform_id" in ds1_base.attrs:
@@ -107,12 +116,18 @@ def convert_to_OG1(list_of_datasets: list[xr.Dataset] | xr.Dataset, contrib_to_a
     ds_og1["TRAJECTORY"].attrs["long_name"] = "trajectory name"
     ds_og1["TRAJECTORY"].attrs["cf_role"] = "trajectory_id"
 
-    ds_og1["DEPLOYMENT_LATITUDE"] = xr.DataArray(ds_og1.LATITUDE.values[~np.isnan(ds_og1.LATITUDE)][0],
-                                              attrs = {"long_name": "latitude of deployment"})
-    ds_og1["DEPLOYMENT_LONGITUDE"] = xr.DataArray(ds_og1.LONGITUDE.values[~np.isnan(ds_og1.LONGITUDE)][0],
-                                               attrs = {"long_name": "longitude of deployment"})
-    ds_og1["DEPLOYMENT_TIME"] = xr.DataArray(ds_og1.TIME.values[~np.isnan(ds_og1.TIME)][0],
-                                             attrs = {"long_name": "time of deployment"})
+    ds_og1["DEPLOYMENT_LATITUDE"] = xr.DataArray(
+        ds_og1.LATITUDE.values[~np.isnan(ds_og1.LATITUDE)][0],
+        attrs={"long_name": "latitude of deployment"},
+    )
+    ds_og1["DEPLOYMENT_LONGITUDE"] = xr.DataArray(
+        ds_og1.LONGITUDE.values[~np.isnan(ds_og1.LONGITUDE)][0],
+        attrs={"long_name": "longitude of deployment"},
+    )
+    ds_og1["DEPLOYMENT_TIME"] = xr.DataArray(
+        ds_og1.TIME.values[~np.isnan(ds_og1.TIME)][0],
+        attrs={"long_name": "time of deployment"},
+    )
 
     # Remove attributes from TIME_GPS
     if "TIME_GPS" in ds_og1.variables:
@@ -165,6 +180,7 @@ def convert_to_OG1(list_of_datasets: list[xr.Dataset] | xr.Dataset, contrib_to_a
     return ds_og1, varlist
 
 
+_log = logging.getLogger(__name__)
 def process_dataset(ds1_base: xr.Dataset, firstrun: bool = False) -> tuple[
     xr.Dataset,  # Processed dataset with renamed variables, assigned attributes, and additional information
     list[str],  # List of warnings related to attribute assignments
@@ -221,48 +237,35 @@ def process_dataset(ds1_base: xr.Dataset, firstrun: bool = False) -> tuple[
     ds1_base = utilities._validate_coords(ds1_base)
     if ds1_base is None or len(ds1_base.variables) == 0:
         return xr.Dataset(), [], xr.Dataset(), xr.Dataset(), xr.Dataset()
-    # Handle and split the inputs.
-    # --------------------------------
-    # Extract the dive number from the attributes
-    divenum = ds1_base.attrs["dive_number"]
-    ### check if the pressure dim and longitude dim are the same
-    ### if not, combine them inside the dataset
-    longitude_dim = ds1_base["longitude"].dims[0]
-    pressure_dim = ds1_base["pressure"].dims[0]
-    if pressure_dim != longitude_dim:
-        ds1_base = tools.combine_two_dim_of_dataset(
-            ds1_base, longitude_dim, pressure_dim
-        )
+    ## Add default dimension sg_data_point
+    dims_to_merge = ['sg_data_point']
+    # add the dimensions that match the instrument names to the list
+    dims, instruments = list(ds1_base.sizes), ds1_base.attrs.get("instrument", "").split()
+    for instrument in instruments:
+        if instrument + "_data_point" in dims:
+            dims_to_merge.append(instrument + "_data_point")
+        elif instrument == "sbe41" and "sbect_data_point" in dims:
+            dims_to_merge.append("sbect_data_point")
+    ### add the dimensions of longitude and pressure, as they are possibly different
+    longitude_dim = list(ds1_base["longitude"].sizes)[0]
+    pressure_dim = list(ds1_base["pressure"].sizes)[0]
+    dims_to_merge += [longitude_dim, pressure_dim]
+    # Remove duplicates
+    dims_to_merge = list(set(dims_to_merge))
     # Split the dataset by unique dimensions
     split_ds = tools.split_by_unique_dims(ds1_base)
-
-    # Extract the sg_data_point from the split dataset
-    ds_sgdatapoint = split_ds[(longitude_dim,)]
-
-    # Extract the gps_info from the split dataset
-    ds_gps = split_ds[("gps_info",)]
-    # Extract variables starting with 'sg_cal'
-    # These will be needed to set attributes for the xarray dataset
-    ds_sgcal, ds_log, ds_other = extract_variables(split_ds[()])
-
-    # Repeat the value of dc_other.depth_avg_curr_east to the length of the dataset
-    var_keep = ["depth_avg_curr_east", "depth_avg_curr_north", "depth_avg_curr_qc"]
-    for var in var_keep:
-        if var in ds_other:
-            v1 = ds_other[var].values
-            vector_v = np.full(len(ds_sgdatapoint["longitude"]), v1)
-            ds_sgdatapoint[var] = ([longitude_dim], vector_v, ds_other[var].attrs)
-
+    merged_ds = tools.merge_datasets_along_time(split_ds, dims_to_merge, firstrun)
     # Rename variables and attributes to OG1 vocabulary
     # -------------------------------------------------------------------
     # Use variables with dimension 'sg_data_point'
     # Must be after split_ds
-    ds_new = standardise_OG10(ds_sgdatapoint, firstrun)
+    ds_new = standardise_OG10(merged_ds, firstrun)
 
     # Add new variables to the dataset (GPS, DIVE_NUMBER, PROFILE_NUMBER, PHASE)
     # -----------------------------------------------------------------------
     # Add the gps_info to the dataset
     # Must be after split_by_unique_dims and after rename_dimensions
+    ds_gps = split_ds[("gps_info",)]
     ds_new = add_gps_info_to_dataset(ds_new, ds_gps)
     # Add the profile number (odd for dives, even for ascents)
     ds_new = tools.assign_profile_number(ds_new, ds1_base)
@@ -273,12 +276,14 @@ def process_dataset(ds1_base: xr.Dataset, firstrun: bool = False) -> tuple[
 
     # Add sensor information to the dataset - can be done on the concatenated data
     # -----------------------------------------------------------------------------
-    ds_sensor = tools.gather_sensor_info(ds_other, ds_sgcal, firstrun)
-    ds_new = tools.add_sensor_to_dataset(ds_new, ds_sensor, ds_sgcal, firstrun)
+    #ds_sensor = tools.gather_sensor_info(ds_other, ds_sgcal, firstrun)
+    #ds_new = tools.add_sensor_to_dataset(ds_new, ds_sensor, ds_sgcal, firstrun)
 
     # To avoid problems, reset the dtype of TIME_GPS
-    ds_new['TIME_GPS'] = (ds_new['TIME_GPS'].astype('float64') * 1e9).astype('datetime64[ns]')
-    vars_to_remove = vocabularies.vars_to_remove #+ ["TIME_GPS"]
+    ds_new["TIME_GPS"] = (ds_new["TIME_GPS"].astype("float64") * 1e9).astype(
+        "datetime64[ns]"
+    )
+    vars_to_remove = vocabularies.vars_to_remove
     vars_present_to_remove = [var for var in vars_to_remove if var in ds_new.variables]
 
     # Drop them
@@ -289,7 +294,8 @@ def process_dataset(ds1_base: xr.Dataset, firstrun: bool = False) -> tuple[
         _log.info("No variables needed to be removed from the dataset.")
 
     attr_warnings = ""
-    return ds_new, attr_warnings, ds_sgcal, ds_other, ds_log
+    return ds_new, attr_warnings
+
 
 def standardise_OG10(
     ds: xr.Dataset,
@@ -370,7 +376,10 @@ def standardise_OG10(
             )
             ### Only log a warning for variables that aren't in the vocabularies and aren't in the list of variables to keep or remove
             ### Removed varaiables will be printed in the log as being removed, so no need to log a warning for them here.
-            if orig_varname not in (*vocabularies.vars_as_is, *vocabularies.vars_to_remove):
+            if orig_varname not in (
+                *vocabularies.vars_as_is,
+                *vocabularies.vars_to_remove,
+            ):
                 vars_not_in_vocab.append(orig_varname)
 
     if firstrun and vars_not_in_vocab:
@@ -508,7 +517,9 @@ def add_gps_info_to_dataset(ds: xr.Dataset, gps_ds: xr.Dataset) -> xr.Dataset:
 ##-----------------------------------------------------------------------------------------
 ## Editing attributes
 ##-----------------------------------------------------------------------------------------
-def update_dataset_attributes(ds: xr.Dataset, contrib_to_append: dict[str, str] | None) -> dict[str, str]:
+def update_dataset_attributes(
+    ds: xr.Dataset, contrib_to_append: dict[str, str] | None
+) -> dict[str, str]:
     """Update the attributes of the dataset based on the provided attribute input.
 
     Processes contributor information, time attributes, and applies OG1
@@ -573,7 +584,9 @@ def update_dataset_attributes(ds: xr.Dataset, contrib_to_append: dict[str, str] 
     return ordered_attributes
 
 
-def get_contributors(ds: xr.Dataset, values_to_append: dict[str, str] | None = None) -> dict[str, str]:
+def get_contributors(
+    ds: xr.Dataset, values_to_append: dict[str, str] | None = None
+) -> dict[str, str]:
     """Extract and format contributor information for OG1 attributes.
 
     Processes creator and contributor information from dataset attributes,
@@ -592,6 +605,7 @@ def get_contributors(ds: xr.Dataset, values_to_append: dict[str, str] | None = N
         Dictionary with formatted contributor attribute strings.
 
     """
+
     # Function to create or append to a list
     def create_or_append_list(existing_list, new_item):
         if new_item not in existing_list:
@@ -811,7 +825,9 @@ def get_time_attributes(ds: xr.Dataset) -> dict[str, str]:
     return time_attrs
 
 
-def extract_attr_to_keep(ds1: xr.Dataset, attr_as_is: list[str] = vocabularies.global_attrs["attr_as_is"]) -> dict[str, str]:
+def extract_attr_to_keep(
+    ds1: xr.Dataset, attr_as_is: list[str] = vocabularies.global_attrs["attr_as_is"]
+) -> dict[str, str]:
     """Extract attributes to retain unchanged.
 
     Parameters
@@ -838,7 +854,8 @@ def extract_attr_to_keep(ds1: xr.Dataset, attr_as_is: list[str] = vocabularies.g
 
 
 def extract_attr_to_rename(
-    ds1: xr.Dataset, attr_to_rename: dict[str, str] = vocabularies.global_attrs["attr_to_rename"]
+    ds1: xr.Dataset,
+    attr_to_rename: dict[str, str] = vocabularies.global_attrs["attr_to_rename"],
 ) -> dict[str, str]:
     """Extract and rename attributes according to OG1 vocabulary.
 
@@ -864,7 +881,12 @@ def extract_attr_to_rename(
     return renamed_attrs
 
 
-def process_and_save_data(input_location: str, save: bool = False, output_dir: str = ".", run_quietly: bool = True) -> xr.Dataset:
+def process_and_save_data(
+    input_location: str,
+    save: bool = False,
+    output_dir: str = ".",
+    run_quietly: bool = True,
+) -> xr.Dataset:
     """Process and save data from the specified input location.
 
     This function loads and concatenates datasets from the server, converts them to OG1 format,

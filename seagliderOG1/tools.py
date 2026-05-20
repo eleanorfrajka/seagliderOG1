@@ -1,4 +1,5 @@
 import logging
+import profile
 import re
 
 import gsw
@@ -398,20 +399,18 @@ def assign_profile_number(ds: xr.Dataset, ds1: xr.Dataset) -> xr.Dataset:
         pmax_index = start_index + np.argmax(
             pressure_data[start_index : end_index + 1].values == pmax
         )
-
         # Assign dive_num to all values up to and including pmax
         ds["dive_num_cast"][start_index : pmax_index + 1] = dive
 
         # Assign dive_num + 0.5 to values after pmax
         ds["dive_num_cast"][pmax_index + 1 : end_index + 1] = dive + 0.5
-
         # Remove PROFILE_NUMBER if it exists
         if "PROFILE_NUMBER" in ds.variables:
             ds = ds.drop_vars("PROFILE_NUMBER")
-
-        # Assign PROFILE_NUMBER
-        ds["PROFILE_NUMBER"] = 2 * ds["dive_num_cast"] - 1
-
+        # Calculate profile number and fill Nan with fill value
+        fill_value = -9999
+        ds["PROFILE_NUMBER"] = (2 * ds["dive_num_cast"] - 1).fillna(fill_value).astype(int)
+        ds["PROFILE_NUMBER"].attrs["_FillValue"] = fill_value
     return ds
 
 
@@ -568,7 +567,6 @@ def split_by_unique_dims(ds: xr.Dataset) -> dict:
     """
     # Dictionary to hold datasets with unique dimension sets
     unique_dims_datasets = {}
-
     # Iterate over the variables in the dataset
     for var_name, var_data in ds.data_vars.items():
         # Get the dimensions of the variable
@@ -1090,6 +1088,95 @@ def merge_parts_of_dataset(
 
     return merged_ds
 
+def merge_datasets_along_time(split_ds, dims_to_merge, first_run=False):
+    """
+    Merge a list of xarray Datasets along their time dimension.
+
+    Parameters
+    ----------
+    split_ds : dict[(str,), xr.Dataset]
+        Mapping from (dimension,) to Dataset.
+
+    dims_to_merge : list[str]
+        Dimension names to extract and merge.
+
+    Returns
+    -------
+    xr.Dataset or None
+        A time-aligned merged dataset, or None if no datasets were eligible.
+    """
+
+    processed_datasets = []
+
+    all_dims = set([dim[0] for dim in split_ds.keys() if len(dim) > 0])
+    actually_merged_dims = set()
+    for dim in dims_to_merge:
+
+        # ---1. Extract dataset---
+        if (dim,) not in split_ds:
+            print(f"Skipping {dim}: not found in split_ds.")
+            continue
+
+        ds = split_ds[(dim,)].copy()
+        old_dim = list(ds.sizes)[0]
+
+        # ---2. Detect datetime64 variable---
+        time_vars = [v for v in ds.variables if "datetime64" in str(ds[v].dtype)]
+        if not time_vars:
+            if first_run:
+                print(f"Skipping '{dim}': No datetime64 variable found.")
+            continue
+
+        ### if more than one time variable is found, takle ctd_time preferibly, otherwise time or the first one. Delete the other time variables.
+        if len(time_vars) > 1:
+            if "ctd_time" in time_vars:
+                time_var = "ctd_time"
+            elif "time" in time_vars:
+                time_var = "time"
+            else:
+                time_var = time_vars[0]
+            for var in time_vars:
+                if var != time_var:
+                    ds = ds.drop_vars(var)
+        else:
+            time_var = time_vars[0]
+
+        # ---3. Rename detected time variable to 'time'---
+        if time_var != "time":
+            ds = ds.rename({time_var: "time"})
+
+        # ---4. Swap old dimension to time---
+        ds = ds.swap_dims({old_dim: "time"})
+
+        # ---5. Add attribute old_dim to each data variable and coordinate (except the time coordinate)---
+        for var in ds.variables:
+            if var != "time":
+                ds[var].attrs["old_dim"] = old_dim
+        if first_run:
+            print(f"Adding variables with dimension '{dim}' and time variable '{time_var}'.")
+
+        processed_datasets.append(ds)
+        actually_merged_dims.add(dim)
+
+    if not processed_datasets:
+        print("No datasets processed. Returning None.")
+        return None
+
+    # ---6. Merge along shared time coordinate---
+    merged_ds = xr.merge(processed_datasets, join="outer")
+
+    # ---7. Swap to N_MEASUREMENTS (optional)---
+    merged_ds = merged_ds.swap_dims({"time": "N_MEASUREMENTS"})
+
+    merged_ds = merged_ds.sortby("time")
+    if first_run:
+        ## Print what remaining dimensions were not merged into the new dataset
+        print(f"The following dimensions were not merged into the new dataset: {all_dims - actually_merged_dims}"
+              "\nIf instrument data is missing make sure it's dimension follows the naming convention of '<instrument>_data_point'"
+              "\nfrom the ds.attrs['instrument'] list.")
+
+    return merged_ds
+
 
 def combine_two_dim_of_dataset(
     ds: xr.Dataset, dim1: str = "sg_data_point", dim2: str = "ctd_data_point"
@@ -1121,6 +1208,133 @@ def combine_two_dim_of_dataset(
     updated_ds = xr.merge([cleaned_ds, merged_ds], combine_attrs="drop_conflicts")
 
     return updated_ds
+
+standard_names = vocabularies.standard_names
+
+def extract_hdm_parameters(list_datasets):
+    """
+    Extracts HDM parameters and their attributes from a list of datasets. If the parameter has the same value across all datasets,
+    it keeps a single value; otherwise, it returns the full list.
+
+    Parameters:
+    -----------
+    list_datasets (list): List of xarray.Dataset objects.
+    standard_names (dict): Vocabulary mapping internal names to standard names.
+
+    Returns:
+    --------
+    dict: A nested dictionary where keys are standard names and values contain
+            the 'data' and 'attributes'.
+    """
+    potential_parameters_OG1 = ['VBD_MIN_CNTS','VBD_CNTS_PER_CC','VBD_CC_PER_CNTS','VBD_BIAS','MASS','VOLMAX','C_VBD','HD_A','HD_B','HD_C']
+    potential_parameters = [key for key, value in standard_names.items() if value in potential_parameters_OG1]
+    hdm_variables = {}
+
+    for param in potential_parameters:
+        # Determine the key name using standard_names mapping
+        param_key = standard_names.get(param, param)
+        if param_key == param and param not in standard_names:
+            print(f"Warning: '{param}' not found in standard names. Using original name.")
+
+        # 1. Check if the parameter exists in the datasets
+        if param not in list_datasets[0].variables:
+            continue
+
+        # 2. Extract values from all datasets
+        all_values = [ds[param].values for ds in list_datasets]
+
+        # 3. Determine if we keep a single value or the full list
+        # We flatten to handle case where .values might be arrays
+        unique_vals = np.unique(np.array(all_values))
+
+        final_value = unique_vals[0] if len(unique_vals) == 1 else all_values
+
+        if isinstance(final_value, list):
+            final_value = np.array(final_value)
+
+        # 4. Store as a dictionary to accommodate both value and attributes and add long_name attribute
+        hdm_variables[param_key] = {
+            "values": final_value,
+            "attributes": list_datasets[0][param].attrs  # Add long_name attribute
+        }
+        hdm_variables[param_key]["attributes"]["original_name"] = param_key
+
+    # 5. Print what parameters from potential_parameters were found and which couldn't not be found in the datasets
+    found_params = [param for param in potential_parameters_OG1 if param in hdm_variables]
+    not_found_params = [param for param in potential_parameters_OG1 if param not in hdm_variables]
+    print(f"The following HDM parameters were found: {found_params}")
+    if not_found_params:
+        print(f"Warning: The following potential HDM parameters were not found in the datasets: {not_found_params}")
+
+    # 6. Add dive_number in order to be able to assign dive-based parameters to the correct profiles in the OG1 dataset
+    dive_numbers = None
+    if "dive_number" in list_datasets[0].attrs:
+        dive_numbers = [ds.dive_number.item() for ds in list_datasets]
+    elif "trajectory" in list_datasets[0].data_vars:
+        dive_numbers = [ds["trajectory"].values for ds in list_datasets]
+    if dive_numbers is not None:
+        hdm_variables["DIVE_NUMBER"] = {"values": dive_numbers}
+    else:
+        print(
+            "Warning: 'dive_number' or 'trajectory' not found in datasets. "
+            "Dive-based parameters may not be correctly assigned."
+        )
+    return hdm_variables
+
+def add_hdm_parameters(ds_OG1, hdm_parameters):
+    """
+    Add HDM parameters to the OG1 dataset as new variables with their attributes.
+
+    Parameters:
+    -----------
+    ds_OG1 (xarray.Dataset): The OG1 dataset to which HDM parameters will be added.
+    hdm_parameters (dict): A dictionary containing HDM parameters and their attributes
+                            in the format {standard_name: {"value": ..., "attributes": {...}}}.
+    Returns:
+    --------
+    xarray.Dataset: Updated OG1 dataset with HDM parameters added as variables.
+    """
+    ds_updated = ds_OG1.copy()
+
+    dive_numbers = hdm_parameters.pop("DIVE_NUMBER", {}).get("values", None)
+
+    for param_name, param_info in hdm_parameters.items():
+        # Using .get() because you used "value" in extract and "values" in your draft
+        values = param_info.get("value") or param_info.get("values")
+        attributes = param_info["attributes"]
+
+        if values is None or np.size(values) == 0:
+            print(f"Warning: Parameter '{param_name}' values are empty. Skipping.")
+            continue
+        # Check if it's a single value (scalar)
+        if dive_numbers is None or np.size(values) == 1:
+            val = np.atleast_1d(values)[0]
+            ds_updated[param_name] = val.item() if hasattr(val, "item") else val
+            ds_updated[param_name].attrs = attributes
+        # Check if it's dive-based (1 value per 2 profiles)
+        elif np.size(values) > 1:
+            mapped_array = np.full(ds_updated.N_MEASUREMENTS.shape, np.nan)
+
+            # Iterate through dives (each dive = 2 profiles)
+            for dive, dive_val in zip(dive_numbers, values):
+                # Find all measurement indices belonging to these two profiles
+                if "DIVE_NUMBER" in ds_updated.data_vars:
+                    mask = ds_updated.DIVE_NUMBER == dive
+                elif "PROFILE_NUMBER" in ds_updated.data_vars:
+                    # Logic: Dive 1 = Profiles 1 & 2
+                    mask = (ds_updated.PROFILE_NUMBER == 2 * dive - 1) | (ds_updated.PROFILE_NUMBER == 2 * dive)
+                else:
+                    print(f"Error: No reference dimension for {param_name}. Skipping dive mapping.")
+                    break
+
+                # Fill the array for those specific measurements
+                mapped_array[mask] = dive_val
+
+            # Add to dataset with the N_MEASUREMENTS dimension
+            ds_updated[param_name] = (("N_MEASUREMENTS",), mapped_array)
+            ds_updated[param_name].attrs = attributes
+
+    return ds_updated
 
 
 # ===============================================================================
