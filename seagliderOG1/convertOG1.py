@@ -67,11 +67,11 @@ def convert_to_OG1(
 
     ds_og1 = xr.concat(processed_datasets, dim="N_MEASUREMENTS")
     ds_og1 = ds_og1.sortby("TIME")
-    # Change format of time into datetime64[ns] to avoid problems with attributes and writing to netcdf
-    # ds_og1["TIME"] = (ds_og1["TIME"].astype("float64") * 1e9).astype("datetime64[ns]")
 
-    # Change format of time into datetime64[ns] to avoid problems with attributes and writing to netcdf
-    ds_og1['TIME'] = (ds_og1['TIME'].astype('float64') * 1e9).astype('datetime64[ns]')
+    # Add sensor information to the dataset - can be done on the concatenated data
+    # -----------------------------------------------------------------------------
+    sensor_dict = tools.gather_sensor_info(list_of_datasets[0])
+    ds_og1 = tools.add_sensor_to_dataset(ds_og1, sensor_dict)
 
     # Apply attributes
     ordered_attributes = update_dataset_attributes(
@@ -246,10 +246,14 @@ def process_dataset(ds1_base: xr.Dataset, firstrun: bool = False) -> tuple[
             dims_to_merge.append(instrument + "_data_point")
         elif instrument == "sbe41" and "sbect_data_point" in dims:
             dims_to_merge.append("sbect_data_point")
-    ### add the dimensions of longitude and pressure, as they are possibly different
-    longitude_dim = list(ds1_base["longitude"].sizes)[0]
-    pressure_dim = list(ds1_base["pressure"].sizes)[0]
-    dims_to_merge += [longitude_dim, pressure_dim]
+    ### add the dimension of longitude, as this might be ctd_data_point and different from the instrument data point dimension
+    ### this the dimension that ctd relies on for pressure, depth, longitude, latitude, time
+    ctd_dim = list(ds1_base["longitude"].sizes)[0]
+    ### delete pressure and depth from dataset if pressure_dim not sg_data_point,
+    ### as then both ctd and navigation pressure exists and we only want to keep the ctd pressure, and depth is redundant with pressure
+    if ctd_dim != "sg_data_point":
+        ds1_base = ds1_base.drop_vars(["pressure", "depth"], errors="ignore")
+    dims_to_merge += [ctd_dim]
     # Remove duplicates
     dims_to_merge = list(set(dims_to_merge))
     # Split the dataset by unique dimensions
@@ -267,22 +271,13 @@ def process_dataset(ds1_base: xr.Dataset, firstrun: bool = False) -> tuple[
     # Must be after split_by_unique_dims and after rename_dimensions
     ds_gps = split_ds[("gps_info",)]
     ds_new = add_gps_info_to_dataset(ds_new, ds_gps)
-    # Add the profile number (odd for dives, even for ascents)
+    # Add the profile number (odd for dives, even for get_sgscents)
     ds_new = tools.assign_profile_number(ds_new, ds1_base)
     # Assign the phase of the dive (must be after adding divenum)
     ds_new = tools.assign_phase(ds_new)
     # Assign DEPTH_Z to the dataset where positive is up.
     ds_new = tools.calc_Z(ds_new)
 
-    # Add sensor information to the dataset - can be done on the concatenated data
-    # -----------------------------------------------------------------------------
-    #ds_sensor = tools.gather_sensor_info(ds_other, ds_sgcal, firstrun)
-    #ds_new = tools.add_sensor_to_dataset(ds_new, ds_sensor, ds_sgcal, firstrun)
-
-    # To avoid problems, reset the dtype of TIME_GPS
-    ds_new["TIME_GPS"] = (ds_new["TIME_GPS"].astype("float64") * 1e9).astype(
-        "datetime64[ns]"
-    )
     vars_to_remove = vocabularies.vars_to_remove
     vars_present_to_remove = [var for var in vars_to_remove if var in ds_new.variables]
 

@@ -11,6 +11,7 @@
 #    OG1_sensor_attrs.yaml (sourced from NERC L22/SeaVoX Catalogue).
 ################################################################################
 #### VARIABLE RENAMING (Raw -> OG1 Standard) ####
+#### Official OG1 variable names are listed here: https://vocab.nerc.ac.uk/collection/OG1/current/ ####
 latitude: LATITUDE
 longitude: LONGITUDE
 gps_lat: LATITUDE_GPS

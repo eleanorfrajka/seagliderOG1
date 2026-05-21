@@ -58,14 +58,14 @@ def rename_dimensions(ds, rename_dict=vocabularies.dims_rename_dict):
     Parameters
     ----------
     ds (xarray.Dataset): The dataset whose dimensions are to be renamed.
-    rename_dict (dict, optional): A dictionary where keys are the current dimension names 
-                                  and values are the new dimension names. Defaults to 
+    rename_dict (dict, optional): A dictionary where keys are the current dimension names
+                                  and values are the new dimension names. Defaults to
                                   vocabularies.dims_rename_dict.
 
     Returns
     -------
     xarray.Dataset: A new dataset with renamed dimensions.
-    
+
     Raises
     ------
     Warning: If no variables with dimensions matching any key in rename_dict are found.
@@ -178,7 +178,7 @@ def convert_to_og1(ds, num_vals=None):
     Return
     ------
     dsa (xarray.Dataset) -    The converted dataset in OG1 format.
-    
+
     Based on example by Jen Seva https://github.com/OceanGlidersCommunity/OG-format-user-manual/pull/136/files
     Using variable names from OG1 vocab https://vocab.nerc.ac.uk/collection/OG1/current/
     Using units from collection P07 http://vocab.nerc.ac.uk/collection/P07/current/
@@ -818,11 +818,11 @@ if __name__ == "__main__":
 ##----------------------------------------------------------------------------------------------------------------------------
 def calc_Z(ds):
     """Calculate the depth (Z position) of the glider using the gsw library to convert pressure to depth.
-    
+
     Parameters
     ----------
     ds (xarray.Dataset): The input dataset containing 'PRES', 'LATITUDE', and 'LONGITUDE' variables.
-    
+
     Returns
     -------
     xarray.Dataset: The dataset with an additional 'DEPTH' variable.
@@ -851,12 +851,12 @@ def calc_Z(ds):
 
 def convert_velocity_units(ds, var_name):
     """Convert the units of the specified variable to m/s if they are in cm/s.
-    
+
     Parameters
     ----------
     ds (xarray.Dataset): The dataset containing the variable.
     var_name (str): The name of the variable to check and convert.
-    
+
     Returns
     -------
     xarray.Dataset: The dataset with the converted variable.
@@ -915,14 +915,14 @@ def assign_profile_number(ds):
 
 def assign_phase(ds):
     """This function adds new variables 'PHASE' and 'PHASE_QC' to the dataset `ds`, which indicate the phase of each measurement. The phase is determined based on the pressure readings ('PRES') for each unique dive number ('dive_num').
-    
+
     Note: In this formulation, we are only separating into dives and climbs based on when the glider is at the maximum depth. Future work needs to separate out the other phases: https://github.com/OceanGlidersCommunity/OG-format-user-manual/blob/main/vocabularyCollection/phase.md and generate a PHASE_QC.
     Assigns phase values to the dataset based on pressure readings.
-        
+
     Parameters
     ----------
     ds (xarray.Dataset): The input dataset containing 'dive_num' and 'PRES' variables.
-    
+
     Returns
     -------
     xarray.Dataset: The dataset with an additional 'PHASE' variable, where:
@@ -931,7 +931,7 @@ def assign_phase(ds):
             - Phase 2 is assigned to measurements up to and including the maximum pressure point.
             - Phase 1 is assigned to measurements after the maximum pressure point.
         - 'PHASE_QC' is an additional variable with no QC applied.
-        
+
     Note: In this formulation, we are only separating into dives and climbs based on when the glider is at the maximum depth.  Future work needs to separate out the other phases: https://github.com/OceanGlidersCommunity/OG-format-user-manual/blob/main/vocabularyCollection/phase.md and generate a PHASE_QC
     """
     # Initialize the new variable with the same dimensions as dive_num
@@ -961,3 +961,69 @@ def assign_phase(ds):
 
     return ds
 
+
+def get_sg_attrs(ds: xr.Dataset) -> dict:
+    """Extract seaglider attributes and calibration information into a dictionary.
+
+    Parameters
+    ----------
+    ds
+        Dataset containing seaglider attributes and calibration data.
+
+    Returns
+    -------
+    dict
+        Dictionary containing seaglider variables and their attributes.
+
+    """
+    id = ds.attrs["id"]
+    sg_cal, _, _ = extract_variables(ds)
+    sg_vars_dict = {}
+    for var, data in sg_cal.items():
+        sg_vars_dict[var] = {attr: data.attrs.get(attr, "") for attr in data.attrs}
+    return sg_vars_dict
+
+def convert_units(ds: xr.Dataset) -> xr.Dataset:
+    """Convert the units of variables in an xarray Dataset to preferred units.
+
+    This is useful, for instance, to convert cm/s to m/s based on vocabulary
+    specifications.
+
+    Parameters
+    ----------
+    ds
+        The dataset containing variables to convert.
+
+    Returns
+    -------
+    xarray.Dataset
+        The dataset with converted units.
+
+    """
+    """
+    Convert the units of variables in an xarray Dataset to preferred units.  This is useful, for instance, to convert cm/s to m/s.
+
+    Parameters
+    ----------
+    ds (xarray.Dataset): The dataset containing variables to convert.
+
+    Returns
+    -------
+    xarray.Dataset: The dataset with converted units.
+    """
+
+    for var in ds.variables:
+        var_values = ds[var].values
+        orig_unit = ds[var].attrs.get("units")
+        if "units" in vocabularies.vocab_attrs[OG1_name]:
+            new_unit = vocabularies.vocab_attrs[OG1_name].get("units")
+            if orig_unit != new_unit:
+
+                var_values, new_unit = convert_units_var(
+                    var_values, orig_unit, new_unit
+                )
+
+                ds[var].values = var_values
+                ds[var].attrs["units"] = new_unit
+
+    return ds
