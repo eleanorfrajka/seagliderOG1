@@ -8,6 +8,7 @@ variable renaming, attribute assignments, and dataset standardization.
 import logging
 import os
 from datetime import datetime
+from turtle import pd
 
 import numpy as np
 import xarray as xr
@@ -276,10 +277,50 @@ def process_dataset(ds1_base: xr.Dataset, firstrun: bool = False) -> tuple[
     #ds_sensor = tools.gather_sensor_info(ds_other, ds_sgcal, firstrun)
     #ds_new = tools.add_sensor_to_dataset(ds_new, ds_sensor, ds_sgcal, firstrun)
 
-    # To avoid problems, reset the dtype of TIME_GPS
-    ds_new["TIME_GPS"] = (ds_new["TIME_GPS"].astype("float64") * 1e9).astype(
-        "datetime64[ns]"
-    )
+    # Now we check the TIME_GPS;
+    # Get dtype - if float, convert - test for unrealistic dates - error if unsupported type.
+
+    dtype = ds_new["TIME_GPS"].dtype
+
+    # Test 1: dtype is already datetime
+    if np.issubdtype(dtype, np.datetime64):
+        pass
+        #print("TIME_GPS is already datetime64")
+
+    # Case 2: numeric -> convert
+    elif np.issubdtype(dtype, np.number):
+
+        values = ds_new["TIME_GPS"].values.astype("float64")
+
+        # Check for NaN or inf
+        if not np.isfinite(values).all():
+            raise ValueError("TIME_GPS contains NaN or infinite values")
+
+        # Convert seconds since epoch -> datetime64[ns]
+        converted = (values * 1e9).astype("datetime64[ns]")
+
+        # Sanity check
+        min_date = converted.min()
+        max_date = converted.max()
+
+        # Define reasonable limits
+        lower_limit = np.datetime64("1990-01-01")
+        upper_limit = np.datetime64("2100-01-01")
+
+        if min_date < lower_limit or max_date > upper_limit:
+            raise ValueError(
+                f"TIME_GPS dates look unrealistic: "
+                f"{min_date} -> {max_date}"
+            )
+
+        ds_new["TIME_GPS"] = converted
+
+    # Case 3: unsupported dtype
+    else:
+        raise TypeError(
+            f"Unsupported TIME_GPS dtype: {dtype}"
+        )
+
     vars_to_remove = vocabularies.vars_to_remove
     vars_present_to_remove = [var for var in vars_to_remove if var in ds_new.variables]
 
@@ -292,7 +333,6 @@ def process_dataset(ds1_base: xr.Dataset, firstrun: bool = False) -> tuple[
 
     attr_warnings = ""
     return ds_new, attr_warnings
-
 
 def standardise_OG10(
     ds: xr.Dataset,
