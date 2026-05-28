@@ -1,6 +1,5 @@
 from email.mime import base
 import logging
-import profile
 import re
 from dateutil import parser
 from datetime import date
@@ -314,7 +313,9 @@ def assign_profile_number(ds: xr.Dataset, ds1: xr.Dataset) -> xr.Dataset:
             ds = ds.drop_vars("PROFILE_NUMBER")
         # Calculate profile number and fill Nan with fill value
         fill_value = -9999
-        ds["PROFILE_NUMBER"] = (2 * ds["dive_num_cast"] - 1).fillna(fill_value).astype(int)
+        ds["PROFILE_NUMBER"] = (
+            (2 * ds["dive_num_cast"] - 1).fillna(fill_value).astype(int)
+        )
         ds["PROFILE_NUMBER"].attrs["_FillValue"] = fill_value
     return ds
 
@@ -965,8 +966,7 @@ def merge_parts_of_dataset(
 
 
 def merge_datasets_along_time(split_ds, dims_to_merge, first_run=False):
-    """
-    Merge a list of xarray Datasets along their time dimension.
+    """Merge a list of xarray Datasets along their time dimension.
 
     Parameters
     ----------
@@ -980,8 +980,8 @@ def merge_datasets_along_time(split_ds, dims_to_merge, first_run=False):
     -------
     xr.Dataset or None
         A time-aligned merged dataset, or None if no datasets were eligible.
-    """
 
+    """
     processed_datasets = []
 
     all_dims = set([dim[0] for dim in split_ds.keys() if len(dim) > 0])
@@ -1029,7 +1029,9 @@ def merge_datasets_along_time(split_ds, dims_to_merge, first_run=False):
             if var != "time":
                 ds[var].attrs["old_dim"] = old_dim
         if first_run:
-            print(f"Adding variables with dimension '{dim}' and time variable '{time_var}'.")
+            print(
+                f"Adding variables with dimension '{dim}' and time variable '{time_var}'."
+            )
 
         processed_datasets.append(ds)
         actually_merged_dims.add(dim)
@@ -1047,9 +1049,11 @@ def merge_datasets_along_time(split_ds, dims_to_merge, first_run=False):
     merged_ds = merged_ds.sortby("time")
     if first_run:
         ## Print what remaining dimensions were not merged into the new dataset
-        print(f"The following dimensions were not merged into the new dataset: {all_dims - actually_merged_dims}"
-              "\nIf instrument data is missing make sure it's dimension follows the naming convention of '<instrument>_data_point'"
-              "\nfrom the ds.attrs['instrument'] list.")
+        print(
+            f"The following dimensions were not merged into the new dataset: {all_dims - actually_merged_dims}"
+            "\nIf instrument data is missing make sure it's dimension follows the naming convention of '<instrument>_data_point'"
+            "\nfrom the ds.attrs['instrument'] list."
+        )
 
     return merged_ds
 
@@ -1073,6 +1077,7 @@ def combine_two_dim_of_dataset(
     -------
     xarray.Dataset
         The updated dataset with merged variables.
+
     """
     # Drop all variables that have dim1 or dim2
     vars_to_drop = [
@@ -1088,30 +1093,48 @@ def combine_two_dim_of_dataset(
 
 standard_names = vocabularies.standard_names
 
+
 def extract_hdm_parameters(list_datasets):
-    """
-    Extracts HDM parameters and their attributes from a list of datasets. If the parameter has the same value across all datasets,
+    """Extracts HDM parameters and their attributes from a list of datasets. If the parameter has the same value across all datasets,
     it keeps a single value; otherwise, it returns the full list.
 
-    Parameters:
-    -----------
+    Parameters
+    ----------
     list_datasets (list): List of xarray.Dataset objects.
     standard_names (dict): Vocabulary mapping internal names to standard names.
 
-    Returns:
-    --------
+    Returns
+    -------
     dict: A nested dictionary where keys are standard names and values contain
             the 'data' and 'attributes'.
+
     """
-    potential_parameters_OG1 = ['VBD_MIN_CNTS','VBD_CNTS_PER_CC','VBD_CC_PER_CNTS','VBD_BIAS','MASS','VOLMAX','C_VBD','HD_A','HD_B','HD_C']
-    potential_parameters = [key for key, value in standard_names.items() if value in potential_parameters_OG1]
+    potential_parameters_OG1 = [
+        "VBD_MIN_CNTS",
+        "VBD_CNTS_PER_CC",
+        "VBD_CC_PER_CNTS",
+        "VBD_BIAS",
+        "MASS",
+        "VOLMAX",
+        "C_VBD",
+        "HD_A",
+        "HD_B",
+        "HD_C",
+    ]
+    potential_parameters = [
+        key
+        for key, value in standard_names.items()
+        if value in potential_parameters_OG1
+    ]
     hdm_variables = {}
 
     for param in potential_parameters:
         # Determine the key name using standard_names mapping
         param_key = standard_names.get(param, param)
         if param_key == param and param not in standard_names:
-            print(f"Warning: '{param}' not found in standard names. Using original name.")
+            print(
+                f"Warning: '{param}' not found in standard names. Using original name."
+            )
 
         # 1. Check if the parameter exists in the datasets
         if param not in list_datasets[0].variables:
@@ -1132,16 +1155,22 @@ def extract_hdm_parameters(list_datasets):
         # 4. Store as a dictionary to accommodate both value and attributes and add long_name attribute
         hdm_variables[param_key] = {
             "values": final_value,
-            "attributes": list_datasets[0][param].attrs  # Add long_name attribute
+            "attributes": list_datasets[0][param].attrs,  # Add long_name attribute
         }
         hdm_variables[param_key]["attributes"]["original_name"] = param_key
 
     # 5. Print what parameters from potential_parameters were found and which couldn't not be found in the datasets
-    found_params = [param for param in potential_parameters_OG1 if param in hdm_variables]
-    not_found_params = [param for param in potential_parameters_OG1 if param not in hdm_variables]
+    found_params = [
+        param for param in potential_parameters_OG1 if param in hdm_variables
+    ]
+    not_found_params = [
+        param for param in potential_parameters_OG1 if param not in hdm_variables
+    ]
     print(f"The following HDM parameters were found: {found_params}")
     if not_found_params:
-        print(f"Warning: The following potential HDM parameters were not found in the datasets: {not_found_params}")
+        print(
+            f"Warning: The following potential HDM parameters were not found in the datasets: {not_found_params}"
+        )
 
     # 6. Add dive_number in order to be able to assign dive-based parameters to the correct profiles in the OG1 dataset
     dive_numbers = None
@@ -1160,17 +1189,18 @@ def extract_hdm_parameters(list_datasets):
 
 
 def add_hdm_parameters(ds_OG1, hdm_parameters):
-    """
-    Add HDM parameters to the OG1 dataset as new variables with their attributes.
+    """Add HDM parameters to the OG1 dataset as new variables with their attributes.
 
-    Parameters:
-    -----------
+    Parameters
+    ----------
     ds_OG1 (xarray.Dataset): The OG1 dataset to which HDM parameters will be added.
     hdm_parameters (dict): A dictionary containing HDM parameters and their attributes
                             in the format {standard_name: {"value": ..., "attributes": {...}}}.
-    Returns:
-    --------
+
+    Returns
+    -------
     xarray.Dataset: Updated OG1 dataset with HDM parameters added as variables.
+
     """
     ds_updated = ds_OG1.copy()
 
@@ -1200,9 +1230,13 @@ def add_hdm_parameters(ds_OG1, hdm_parameters):
                     mask = ds_updated.DIVE_NUMBER == dive
                 elif "PROFILE_NUMBER" in ds_updated.data_vars:
                     # Logic: Dive 1 = Profiles 1 & 2
-                    mask = (ds_updated.PROFILE_NUMBER == 2 * dive - 1) | (ds_updated.PROFILE_NUMBER == 2 * dive)
+                    mask = (ds_updated.PROFILE_NUMBER == 2 * dive - 1) | (
+                        ds_updated.PROFILE_NUMBER == 2 * dive
+                    )
                 else:
-                    print(f"Error: No reference dimension for {param_name}. Skipping dive mapping.")
+                    print(
+                        f"Error: No reference dimension for {param_name}. Skipping dive mapping."
+                    )
                     break
 
                 # Fill the array for those specific measurements
