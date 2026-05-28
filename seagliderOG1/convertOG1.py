@@ -236,7 +236,7 @@ def process_dataset(ds1_base: xr.Dataset, firstrun: bool = False) -> tuple[
     # Check if the dataset has 'LONGITUDE' as a coordinate
     ds1_base = utilities._validate_coords(ds1_base)
     if ds1_base is None or len(ds1_base.variables) == 0:
-        return xr.Dataset(), [], xr.Dataset(), xr.Dataset(), xr.Dataset()
+        return xr.Dataset(), []
     ## Add default dimension sg_data_point
     dims_to_merge = ['sg_data_point']
     # add the dimensions that match the instrument names to the list
