@@ -3,21 +3,22 @@ import pandas as pd
 import xarray as xr
 from seagliderOG1 import vocabularies
 import gsw
-#import pandas as pd
-#import numpy as np
-#import xarray as xr
-#from votoutils.utilities.utilities import encode_times_og1, set_best_dtype
-#from votoutils.utilities import vocabularies
+
+# import pandas as pd
+# import numpy as np
+# import xarray as xr
+# from votoutils.utilities.utilities import encode_times_og1, set_best_dtype
+# from votoutils.utilities import vocabularies
 import logging
 from datetime import datetime
 
 _log = logging.getLogger(__name__)
 
 
-
-
 # from convertOG1 - Deprecated - currently just uses the standard vocabularies.vocab_attrs but could clobber existing attributes
-def assign_variable_attributes(ds, vocab_attrs=vocabularies.vocab_attrs, unit_format=vocabularies.unit_str_format):
+def assign_variable_attributes(
+    ds, vocab_attrs=vocabularies.vocab_attrs, unit_format=vocabularies.unit_str_format
+):
     """Assigns variable attributes to a dataset where they are missing and reformats units according to the provided unit_format.
     Attributes that already exist in the dataset are not changed, except for unit reformatting.
 
@@ -72,12 +73,17 @@ def rename_dimensions(ds, rename_dict=vocabularies.dims_rename_dict):
 
     """
     # Check if there are any variables with dimensions matching 'sg_data_point'
-    matching_vars = [var for var in ds.variables if any(dim in ds[var].dims for dim in rename_dict.keys())]
+    matching_vars = [
+        var
+        for var in ds.variables
+        if any(dim in ds[var].dims for dim in rename_dict.keys())
+    ]
     if not matching_vars:
-        _log.warning("No variables with dimensions matching any key in rename_dict found.")
+        _log.warning(
+            "No variables with dimensions matching any key in rename_dict found."
+        )
     dims_to_rename = {dim: rename_dict[dim] for dim in ds.dims if dim in rename_dict}
     return ds.rename_dims(dims_to_rename)
-
 
 
 def find_best_dtype(var_name, da):
@@ -98,7 +104,6 @@ def find_best_dtype(var_name, da):
     return input_dtype
 
 
-
 variables_sensors = {
     "CNDC": "CTD",
     "DOXY": "dissolved gas sensors",
@@ -109,6 +114,7 @@ variables_sensors = {
     "CHLA": "fluorometers",
     "PRES_ADCP": "ADVs and turbulence probes",
 }
+
 
 def add_sensors(ds, dsa):
     attrs = ds.attrs
@@ -161,7 +167,6 @@ def add_sensors(ds, dsa):
     return ds, dsa
 
 
-
 def convert_to_og1(ds, num_vals=None):
     """Converts a given dataset to the OG1 format, applying specific variable names, units, and attributes as per the OG1 vocabulary and standards.
 
@@ -201,9 +206,9 @@ def convert_to_og1(ds, num_vals=None):
                 ds[qc_name].values[:num_vals].astype("int8"),
                 ds[qc_name].attrs,
             )
-            dsa[qc_name].attrs["long_name"] = (
-                f'{dsa[var_name].attrs["long_name"]} Quality Flag'
-            )
+            dsa[qc_name].attrs[
+                "long_name"
+            ] = f'{dsa[var_name].attrs["long_name"]} Quality Flag'
             dsa[qc_name].attrs["standard_name"] = "status_flag"
             dsa[qc_name].attrs["flag_values"] = np.array((1, 2, 3, 4, 9)).astype("int8")
             dsa[qc_name].attrs["flag_meanings"] = "GOOD UNKNOWN SUSPECT FAIL MISSING"
@@ -218,12 +223,12 @@ def convert_to_og1(ds, num_vals=None):
         dsa[f"{vname}_GPS"] = dsa[vname].copy()
         dsa[f"{vname}_GPS"].values[dsa["nav_state"].values != 119] = np.nan
         dsa[f"{vname}_GPS"].attrs["long_name"] = f"{vname.lower()} of each GPS location"
-    dsa["LATITUDE_GPS"].attrs["URI"] = (
-        "https://vocab.nerc.ac.uk/collection/OG1/current/LAT_GPS/"
-    )
-    dsa["LONGITUDE_GPS"].attrs["URI"] = (
-        "https://vocab.nerc.ac.uk/collection/OG1/current/LON_GPS/"
-    )
+    dsa["LATITUDE_GPS"].attrs[
+        "URI"
+    ] = "https://vocab.nerc.ac.uk/collection/OG1/current/LAT_GPS/"
+    dsa["LONGITUDE_GPS"].attrs[
+        "URI"
+    ] = "https://vocab.nerc.ac.uk/collection/OG1/current/LON_GPS/"
     seaex_phase = dsa["nav_state"].values
     standard_phase = np.zeros(len(seaex_phase)).astype(int)
     standard_phase[seaex_phase == 115] = 3
@@ -314,8 +319,9 @@ def convert_to_og1(ds, num_vals=None):
     dsa["DEPLOYMENT_LONGITUDE"] = dsa.LONGITUDE.values[0]
     dsa["DEPLOYMENT_LONGITUDE"].attrs = {"long_name": "longitude of deployment"}
     dsa = encode_times_og1(dsa)
-#    dsa = set_best_dtype(dsa)
+    #    dsa = set_best_dtype(dsa)
     return dsa
+
 
 def standardise_og10(ds):
     """Standardizes the given xarray Dataset according to predefined vocabularies.
@@ -352,8 +358,8 @@ def standardise_og10(ds):
     dsa.attrs = ds.attrs
 
     ds_renamed = ds.rename_dims(vocabularies.dims_rename_dict)
-#    ds_renamed = ds_renamed.rename_vars(vocabularies.coords_rename_dict)
-#    ds_renamed = ds_renamed.rename_vars(vocabularies.vars_rename_dict)
+    #    ds_renamed = ds_renamed.rename_vars(vocabularies.coords_rename_dict)
+    #    ds_renamed = ds_renamed.rename_vars(vocabularies.vars_rename_dict)
     vars_to_keep = set(vocabularies.vars_rename_dict.values())
 
     # Rename dimensions based on the vocabularies.dims_rename_dict
@@ -381,13 +387,14 @@ def standardise_og10(ds):
                 dsa[f"{name}_QC"] = ("time", ds[qc_name].values, ds[qc_name].attrs)
                 dsa[name].attrs["ancillary_variables"] = f"{name}_QC"
         else:
-#           Note: this differs from the original standardise_og10 function
-#            dsa[var_name] = ("time", ds[var_name].values, ds[var_name].attrs)
+            #           Note: this differs from the original standardise_og10 function
+            #            dsa[var_name] = ("time", ds[var_name].values, ds[var_name].attrs)
             if var_name not in vars_as_is:
                 _log.error(f"variable {var_name} not translated.")
 
     # dsa = set_best_dtype(dsa) - this changes data types - skipping for now
     return dsa
+
 
 def add_standard_global_attrs(ds):
     date_created = datetime.datetime.now().isoformat().split(".")[0]
@@ -441,6 +448,7 @@ def add_standard_global_attrs(ds):
         ds.attrs[key] = val
     return ds
 
+
 # Deprecated
 def add_sensors_old(ds, dsa):
     attrs = ds.attrs
@@ -492,6 +500,7 @@ def add_sensors_old(ds, dsa):
 
     return ds, dsa
 
+
 # Deprecated - is Seaexplorer specific
 def sensor_sampling_period(glider, mission):
     # Get sampling period of CTD in seconds for a given glider mission
@@ -516,11 +525,15 @@ def sensor_sampling_period(glider, mission):
     }
     return sample_dict
 
+
 # Not used
 def natural_sort(unsorted_list):
     convert = lambda text: int(text) if text.isdigit() else text.lower()  # noqa: E731
-    alphanum_key = lambda key: [convert(c) for c in re.split("([0-9]+)", key)]  # noqa: E731
+    alphanum_key = lambda key: [
+        convert(c) for c in re.split("([0-9]+)", key)
+    ]  # noqa: E731
     return sorted(unsorted_list, key=alphanum_key)
+
 
 # Template - doesn't work - requires mailer.sh
 def mailer(subject, message, recipient="callum.rollo@voiceoftheocean.org"):
@@ -528,6 +541,8 @@ def mailer(subject, message, recipient="callum.rollo@voiceoftheocean.org"):
     subject = subject.replace(" ", "-")
     send_script = sync_script_dir / "mailer.sh"
     subprocess.check_call(["/usr/bin/bash", send_script, message, subject, recipient])
+
+
 ##----------------------------------------------------------------------------------------------------------------------------
 ## Editing variables
 ##----------------------------------------------------------------------------------------------------------------------------
@@ -549,15 +564,16 @@ vars_as_is = [
     "security_level",
     "voltage",
     "distance_over_ground",
-#    "ad2cp_beam1_cell_number1",
-#    "ad2cp_beam2_cell_number1",
-#    "ad2cp_beam3_cell_number1",
-#    "ad2cp_beam4_cell_number1",
-#    "vertical_distance_to_seafloor",
-#    "profile_direction",
+    #    "ad2cp_beam1_cell_number1",
+    #    "ad2cp_beam2_cell_number1",
+    #    "ad2cp_beam3_cell_number1",
+    #    "ad2cp_beam4_cell_number1",
+    #    "vertical_distance_to_seafloor",
+    #    "profile_direction",
     "profile_num",
     "nav_state",
 ]
+
 
 def create_renamed_dataset(ds):
     from seagliderOG1 import vocabularies
@@ -572,9 +588,9 @@ def create_renamed_dataset(ds):
     ds_renamed = ds_renamed[vars_to_keep]
 
     # Check if PROFILE_NUMBER is present as a variable
-    if 'PROFILE_NUMBER' not in ds_renamed.variables:
+    if "PROFILE_NUMBER" not in ds_renamed.variables:
         ds_renamed = assign_profile_number(ds_renamed)
-    if 'PHASE' not in ds_renamed.variables:
+    if "PHASE" not in ds_renamed.variables:
         ds_renamed = assign_phase(ds_renamed)
 
     # Cycle through the variables within ds_renamed and ds_renamed.coords
@@ -585,19 +601,24 @@ def create_renamed_dataset(ds):
                     ds_renamed[name].attrs[key] = val
 
     # Update the attributes time_coverage_start and time_coverage_end
-    time_coverage_start = pd.to_datetime(ds_renamed.TIME.values[0]).strftime("%Y%m%dT%H%M%S")
-    time_coverage_end = pd.to_datetime(ds_renamed.TIME.values[-1]).strftime("%Y%m%dT%H%M%S")
+    time_coverage_start = pd.to_datetime(ds_renamed.TIME.values[0]).strftime(
+        "%Y%m%dT%H%M%S"
+    )
+    time_coverage_end = pd.to_datetime(ds_renamed.TIME.values[-1]).strftime(
+        "%Y%m%dT%H%M%S"
+    )
     ds_renamed.attrs["time_coverage_start"] = time_coverage_start
     ds_renamed.attrs["time_coverage_end"] = time_coverage_end
 
     # Update the attribute date_created to today's date
-    ds_renamed.attrs["date_created"] = datetime.utcnow().strftime('%Y%m%dT%H%M%S')
+    ds_renamed.attrs["date_created"] = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
 
     # Check whether time_coverage_start is before start_date.  If so, then update start_date
     if time_coverage_start < ds_renamed.attrs["start_date"]:
         ds_renamed.attrs["start_date"] = time_coverage_start
 
     return ds_renamed
+
 
 ##----------------------------------------------------------------------------------------------------------------------------
 ## Editing attributes
@@ -648,35 +669,57 @@ def generate_attributes(ds_all):
         - date_modified: Modification date of the dataset.
         - contributor_name: Name of the contributor.
         - contributor_role: Role of the contributor.
+
     """
     title = "OceanGliders trajectory file"
     platform = "sub-surface gliders"
     platform_vocabulary = "https://vocab.nerc.ac.uk/collection/L06/current/27/"
 
-    time_str = ds_all.time_coverage_start.replace('_', '').replace(':', '').rstrip('Z').rstrip('Z').replace('-','')
-    id = ds_all.platform_id + '_' + time_str + '_delayed'
+    time_str = (
+        ds_all.time_coverage_start.replace("_", "")
+        .replace(":", "")
+        .rstrip("Z")
+        .rstrip("Z")
+        .replace("-", "")
+    )
+    id = ds_all.platform_id + "_" + time_str + "_delayed"
     time_coverage_start = time_str
-    time_coverage_end = ds_all.time_coverage_end.replace('_', '').replace(':', '').rstrip('Z').replace('-','')
+    time_coverage_end = (
+        ds_all.time_coverage_end.replace("_", "")
+        .replace(":", "")
+        .rstrip("Z")
+        .replace("-", "")
+    )
 
     site = ds_all.summary
-    contributor_name = ds_all.creator_name + ', ' + ds_all.contributor_name
+    contributor_name = ds_all.creator_name + ", " + ds_all.contributor_name
     contributor_email = ds_all.creator_email
     contributor_role = "PI, " + ds_all.contributor_role
     contributor_role_vocabulary = "http://vocab.nerc.ac.uk/search_nvs/W08/"
     contributing_institutions = "University of Washington - School of Oceanography, University of Hamburg - Institute of Oceanography"
-    contributing_institutions_vocabulary = 'https://edmo.seadatanet.org/report/1434, https://edmo.seadatanet.org/report/1156'
+    contributing_institutions_vocabulary = "https://edmo.seadatanet.org/report/1434, https://edmo.seadatanet.org/report/1156"
     contributing_institutions_role = "Operator, Data scientist"
-    contributing_institutions_role_vocabulary = "http://vocab.nerc.ac.uk/collection/W08/current/"
+    contributing_institutions_role_vocabulary = (
+        "http://vocab.nerc.ac.uk/collection/W08/current/"
+    )
     uri = ds_all.uuid
     uri_comment = "UUID"
     web_link = "https://www.ncei.noaa.gov/access/metadata/landing-page/bin/iso?id=gov.noaa.nodc:0111844"
     comment = "history: " + ds_all.history
     start_date = time_coverage_start
-    date_created = ds_all.date_created.replace('_', '').replace(':', '').rstrip('Z').rstrip('Z').replace('-','')
-    date_modified = datetime.now().strftime('%Y%m%dT%H%M%S')
+    date_created = (
+        ds_all.date_created.replace("_", "")
+        .replace(":", "")
+        .rstrip("Z")
+        .rstrip("Z")
+        .replace("-", "")
+    )
+    date_modified = datetime.now().strftime("%Y%m%dT%H%M%S")
     featureType = "trajectory"
     Conventions = "CF-1.10,OG-1.0"
-    landstation_version = ds_all.base_station_version + ds_all.base_station_micro_version
+    landstation_version = (
+        ds_all.base_station_version + ds_all.base_station_micro_version
+    )
     glider_firmware_version = ds_all.seaglider_software_version
     rtqc_method = "No QC applied"
     rtqc_method_doi = "n/a"
@@ -737,7 +780,6 @@ def generate_attributes(ds_all):
         "disclaimer",
     ]
 
-
     # After changing attributes
     attr_to_remove = [
         "summary",
@@ -755,7 +797,6 @@ def generate_attributes(ds_all):
         "Metadata_Conventions",
     ]
 
-
     return attr_to_add, attr_as_is, attr_to_change, attr_to_remove
 
 
@@ -763,14 +804,37 @@ def modify_attributes(ds, attr_to_add, attr_as_is, attr_to_change, attr_to_remov
 
     # Define the order of attributes
     ordered_attributes = [
-        "title", "platform", "platform_vocabulary", "id", "naming_authority",
-        "institution", "geospatial_lat_min", "geospatial_lat_max",
-        "geospatial_lon_min", "geospatial_lon_max", "geospatial_vertical_min",
-        "geospatial_vertical_max", "time_coverage_start", "time_coverage_end",
-        "site", "project", "contributor_name", "contributor_email",
-        "contributor_role", "contributor_role_vocabulary", "uri", "data_url",
-        "doi", "rtqc_method", "rtqc_method_doi", "web_link", "comment",
-        "start_date", "date_created", "featureType", "Conventions"
+        "title",
+        "platform",
+        "platform_vocabulary",
+        "id",
+        "naming_authority",
+        "institution",
+        "geospatial_lat_min",
+        "geospatial_lat_max",
+        "geospatial_lon_min",
+        "geospatial_lon_max",
+        "geospatial_vertical_min",
+        "geospatial_vertical_max",
+        "time_coverage_start",
+        "time_coverage_end",
+        "site",
+        "project",
+        "contributor_name",
+        "contributor_email",
+        "contributor_role",
+        "contributor_role_vocabulary",
+        "uri",
+        "data_url",
+        "doi",
+        "rtqc_method",
+        "rtqc_method_doi",
+        "web_link",
+        "comment",
+        "start_date",
+        "date_created",
+        "featureType",
+        "Conventions",
     ]
     # Retain specified attributes
     new_attrs = {key: ds.attrs[key] for key in attr_as_is if key in ds.attrs}
@@ -797,13 +861,16 @@ def modify_attributes(ds, attr_to_add, attr_as_is, attr_to_change, attr_to_remov
             ordered_attributes.append(attr)
 
     # Reorder the attributes in ds_new_att according to ordered_attributes
-    new_attrs = {attr: ds.attrs[attr] for attr in ordered_attributes if attr in ds.attrs}
+    new_attrs = {
+        attr: ds.attrs[attr] for attr in ordered_attributes if attr in ds.attrs
+    }
     for attr in ds.attrs:
         if attr not in new_attrs:
             new_attrs[attr] = ds.attrs[attr]
 
     ds.attrs = new_attrs
     return ds
+
 
 if __name__ == "__main__":
     dsn = xr.open_dataset(
@@ -812,6 +879,7 @@ if __name__ == "__main__":
     dsn = standardise_og10(dsn)
     dsn = convert_to_og1(dsn)
     dsn.to_netcdf("new.nc")
+
 
 ##----------------------------------------------------------------------------------------------------------------------------
 ## Calculations for new variables
@@ -829,18 +897,24 @@ def calc_Z(ds):
 
     """
     # Ensure the required variables are present
-    if 'PRES' not in ds.variables or 'LATITUDE' not in ds.variables or 'LONGITUDE' not in ds.variables:
-        raise ValueError("Dataset must contain 'PRES', 'LATITUDE', and 'LONGITUDE' variables.")
+    if (
+        "PRES" not in ds.variables
+        or "LATITUDE" not in ds.variables
+        or "LONGITUDE" not in ds.variables
+    ):
+        raise ValueError(
+            "Dataset must contain 'PRES', 'LATITUDE', and 'LONGITUDE' variables."
+        )
 
     # Initialize the new variable with the same dimensions as dive_num
-    ds['DEPTH_Z'] = (['N_MEASUREMENTS'], np.full(ds.dims['N_MEASUREMENTS'], np.nan))
+    ds["DEPTH_Z"] = (["N_MEASUREMENTS"], np.full(ds.dims["N_MEASUREMENTS"], np.nan))
 
     # Calculate depth using gsw
-    depth = gsw.z_from_p(ds['PRES'], ds['LATITUDE'])
-    ds['DEPTH_Z'] = depth
+    depth = gsw.z_from_p(ds["PRES"], ds["LATITUDE"])
+    ds["DEPTH_Z"] = depth
 
     # Assign the calculated depth to a new variable in the dataset
-    ds['DEPTH_Z'].attrs = {
+    ds["DEPTH_Z"].attrs = {
         "units": "meters",
         "positive": "up",
         "standard_name": "depth",
@@ -848,6 +922,7 @@ def calc_Z(ds):
     }
 
     return ds
+
 
 def convert_velocity_units(ds, var_name):
     """Convert the units of the specified variable to m/s if they are in cm/s.
@@ -865,12 +940,12 @@ def convert_velocity_units(ds, var_name):
     if var_name in ds.variables:
         # Pass through all other attributes as is
         for attr_name, attr_value in ds[var_name].attrs.items():
-            if attr_name != 'units':
+            if attr_name != "units":
                 ds[var_name].attrs[attr_name] = attr_value
-            elif attr_name == 'units':
-                if ds[var_name].attrs['units'] == 'cm/s':
+            elif attr_name == "units":
+                if ds[var_name].attrs["units"] == "cm/s":
                     ds[var_name].values = ds[var_name].values / 100.0
-                    ds[var_name].attrs['units'] = 'm/s'
+                    ds[var_name].attrs["units"] = "m/s"
                     print(f"Converted {var_name} to m/s")
                 else:
                     print(f"{var_name} is already in m/s or units attribute is missing")
@@ -879,39 +954,46 @@ def convert_velocity_units(ds, var_name):
         print(f"{var_name} not found in the dataset")
     return ds
 
+
 def assign_profile_number(ds):
     # Remove the variable dive_num_cast if it exists
-    if 'dive_num_cast' in ds.variables:
-        ds = ds.drop_vars('dive_num_cast')
+    if "dive_num_cast" in ds.variables:
+        ds = ds.drop_vars("dive_num_cast")
     # Initialize the new variable with the same dimensions as dive_num
-    ds['dive_num_cast'] = (['N_MEASUREMENTS'], np.full(ds.dims['N_MEASUREMENTS'], np.nan))
+    ds["dive_num_cast"] = (
+        ["N_MEASUREMENTS"],
+        np.full(ds.dims["N_MEASUREMENTS"], np.nan),
+    )
 
     # Iterate over each unique dive_num
-    for dive in np.unique(ds['dive_num']):
+    for dive in np.unique(ds["dive_num"]):
         # Get the indices for the current dive
-        dive_indices = np.where(ds['dive_num'] == dive)[0]
+        dive_indices = np.where(ds["dive_num"] == dive)[0]
         # Find the start and end index for the current dive
         start_index = dive_indices[0]
         end_index = dive_indices[-1]
 
         # Find the index of the maximum pressure between start_index and end_index
-        pmax = np.max(ds['PRES'][start_index:end_index + 1].values)
+        pmax = np.max(ds["PRES"][start_index : end_index + 1].values)
 
         # Find the index where PRES attains the value pmax between start_index and end_index
-        pmax_index = start_index + np.argmax(ds['PRES'][start_index:end_index + 1].values == pmax)
+        pmax_index = start_index + np.argmax(
+            ds["PRES"][start_index : end_index + 1].values == pmax
+        )
 
         # Assign dive_num to all values up to and including the point where pmax is reached
-        ds['dive_num_cast'][start_index:pmax_index + 1] = dive
+        ds["dive_num_cast"][start_index : pmax_index + 1] = dive
 
         # Assign dive_num + 0.5 to all values after pmax is reached
-        ds['dive_num_cast'][pmax_index + 1:end_index + 1] = dive + 0.5
+        ds["dive_num_cast"][pmax_index + 1 : end_index + 1] = dive + 0.5
 
         # Remove the variable PROFILE_NUMBER if it exists
-        if 'PROFILE_NUMBER' in ds.variables:
-            ds = ds.drop_vars('PROFILE_NUMBER')
+        if "PROFILE_NUMBER" in ds.variables:
+            ds = ds.drop_vars("PROFILE_NUMBER")
         # Assign PROFILE_NUMBER as 2 * dive_num_cast - 1
-        ds['PROFILE_NUMBER'] = 2 * ds['dive_num_cast'] - 1
+        ds["PROFILE_NUMBER"] = 2 * ds["dive_num_cast"] - 1
     return ds
+
 
 def assign_phase(ds):
     """This function adds new variables 'PHASE' and 'PHASE_QC' to the dataset `ds`, which indicate the phase of each measurement. The phase is determined based on the pressure readings ('PRES') for each unique dive number ('dive_num').
@@ -933,31 +1015,37 @@ def assign_phase(ds):
         - 'PHASE_QC' is an additional variable with no QC applied.
 
     Note: In this formulation, we are only separating into dives and climbs based on when the glider is at the maximum depth.  Future work needs to separate out the other phases: https://github.com/OceanGlidersCommunity/OG-format-user-manual/blob/main/vocabularyCollection/phase.md and generate a PHASE_QC
+
     """
     # Initialize the new variable with the same dimensions as dive_num
-    ds['PHASE'] = (['N_MEASUREMENTS'], np.full(ds.dims['N_MEASUREMENTS'], np.nan))
+    ds["PHASE"] = (["N_MEASUREMENTS"], np.full(ds.dims["N_MEASUREMENTS"], np.nan))
     # Initialize the new variable PHASE_QC with the same dimensions as dive_num
-    ds['PHASE_QC'] = (['N_MEASUREMENTS'], np.zeros(ds.dims['N_MEASUREMENTS'], dtype=int))
+    ds["PHASE_QC"] = (
+        ["N_MEASUREMENTS"],
+        np.zeros(ds.dims["N_MEASUREMENTS"], dtype=int),
+    )
 
     # Iterate over each unique dive_num
-    for dive in np.unique(ds['dive_num']):
+    for dive in np.unique(ds["dive_num"]):
         # Get the indices for the current dive
-        dive_indices = np.where(ds['dive_num'] == dive)[0]
+        dive_indices = np.where(ds["dive_num"] == dive)[0]
         # Find the start and end index for the current dive
         start_index = dive_indices[0]
         end_index = dive_indices[-1]
 
         # Find the index of the maximum pressure between start_index and end_index
-        pmax = np.max(ds['PRES'][start_index:end_index + 1].values)
+        pmax = np.max(ds["PRES"][start_index : end_index + 1].values)
 
         # Find the index where PRES attains the value pmax between start_index and end_index
-        pmax_index = start_index + np.argmax(ds['PRES'][start_index:end_index + 1].values == pmax)
+        pmax_index = start_index + np.argmax(
+            ds["PRES"][start_index : end_index + 1].values == pmax
+        )
 
         # Assign phase 2 to all values up to and including the point where pmax is reached
-        ds['PHASE'][start_index:pmax_index + 1] = 2
+        ds["PHASE"][start_index : pmax_index + 1] = 2
 
         # Assign phase 1 to all values after pmax is reached
-        ds['PHASE'][pmax_index + 1:end_index + 1] = 1
+        ds["PHASE"][pmax_index + 1 : end_index + 1] = 1
 
     return ds
 
@@ -982,6 +1070,7 @@ def get_sg_attrs(ds: xr.Dataset) -> dict:
     for var, data in sg_cal.items():
         sg_vars_dict[var] = {attr: data.attrs.get(attr, "") for attr in data.attrs}
     return sg_vars_dict
+
 
 def convert_units(ds: xr.Dataset) -> xr.Dataset:
     """Convert the units of variables in an xarray Dataset to preferred units.

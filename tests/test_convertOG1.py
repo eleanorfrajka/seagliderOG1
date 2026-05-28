@@ -18,12 +18,7 @@ def test_process_dataset():
 
     key_dims = list(split_ds.keys())
     key_dims.sort()
-    assert key_dims == [
-        (),
-        ("gc_event",),
-        ("gps_info",),
-        ("sg_data_point",)
-    ]
+    assert key_dims == [(), ("gc_event",), ("gps_info",), ("sg_data_point",)]
 
     ds = split_ds[("sg_data_point",)]
     gps_info = split_ds[("gps_info",)]

@@ -1,4 +1,3 @@
-from email.mime import base
 import logging
 import re
 from dateutil import parser
@@ -9,14 +8,13 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 
-from seagliderOG1 import utilities, vocabularies
+from seagliderOG1 import vocabularies
 
 _log = logging.getLogger(__name__)
 
 
 def gather_sensor_info(ds1_base) -> dict:
-    """
-    Gathers sensor information from an OG1 base dataset.
+    """Gathers sensor information from an OG1 base dataset.
 
     Extracts:
       - sensor names (from global 'instrument' attribute)
@@ -35,8 +33,8 @@ def gather_sensor_info(ds1_base) -> dict:
     -------
     dict
         Dictionary with one key per sensor, each containing metadata.
-    """
 
+    """
     # -------------------------------------------------------------------------
     # 1. Extract sensor names from the 'instrument' global attribute
     # -------------------------------------------------------------------------
@@ -52,9 +50,11 @@ def gather_sensor_info(ds1_base) -> dict:
             sensor_dict[sensor] = {}
     else:
 
-        print("Warning: 'instrument' attribute not found in the dataset. Therefore no sensor information extracted from attributes. " \
-              "If you have sensor information in the attributes, please add an 'instrument' attribute with the sensor names separated by spaces." \
-              " For example: ds.attrs['instrument'] = 'sbe41 wlbb2f sbe43'")
+        print(
+            "Warning: 'instrument' attribute not found in the dataset. Therefore no sensor information extracted from attributes. "
+            "If you have sensor information in the attributes, please add an 'instrument' attribute with the sensor names separated by spaces."
+            " For example: ds.attrs['instrument'] = 'sbe41 wlbb2f sbe43'"
+        )
         return sensor_dict
 
     # -------------------------------------------------------------------------
@@ -74,8 +74,8 @@ def gather_sensor_info(ds1_base) -> dict:
         else:
             print(
                 f"Warning: Sensor '{sensor}' not found in standard names vocabulary. "
-                    "No technical specifications added."
-                )
+                "No technical specifications added."
+            )
 
     # -------------------------------------------------------------------------
     # 3. Extract calibration information (serial number + calibration dates)
@@ -84,13 +84,15 @@ def gather_sensor_info(ds1_base) -> dict:
         return base[varname] if varname in base.variables else None
 
     sensor_nums = len(sensor_dict.keys())
-    available_calibcomm = [v for v in ds1_base.variables if v.startswith("sg_cal_calibcomm")]
+    available_calibcomm = [
+        v for v in ds1_base.variables if v.startswith("sg_cal_calibcomm")
+    ]
     if len(available_calibcomm) > sensor_nums:
-            print(
-                f"Warning: More calibration variables found as stated in instrument attributes!\n"
-                f"The following calibration variables were found: {available_calibcomm}\n"
-                f"But only {sensor_nums} sensors were listed in the instrument attributes: {list(sensor_dict.keys())}"
-            )
+        print(
+            f"Warning: More calibration variables found as stated in instrument attributes!\n"
+            f"The following calibration variables were found: {available_calibcomm}\n"
+            f"But only {sensor_nums} sensors were listed in the instrument attributes: {list(sensor_dict.keys())}"
+        )
 
     for sensor in sensor_dict.keys():
 
@@ -112,9 +114,8 @@ def gather_sensor_info(ds1_base) -> dict:
             calibcomm_str = str(var.values.item()) if var is not None else None
 
         elif sensor_dict[sensor].get("sensor_type") == "Oxygen":
-            var = (
-                get_if_exists(base, "sg_cal_calibcomm_optode")
-                or get_if_exists(base, "sg_cal_calibcomm_oxygen")
+            var = get_if_exists(base, "sg_cal_calibcomm_optode") or get_if_exists(
+                base, "sg_cal_calibcomm_oxygen"
             )
             calibcomm_str = str(var.values.item()) if var is not None else None
 
@@ -143,8 +144,7 @@ def gather_sensor_info(ds1_base) -> dict:
 
 
 def add_sensor_to_dataset(ds_og1, sensor_dict, firstrun=False) -> xr.Dataset:
-    """
-    Adds sensor information from the provided sensor dictionary to the OG1 dataset.
+    """Adds sensor information from the provided sensor dictionary to the OG1 dataset.
 
     Parameters
     ----------
@@ -164,6 +164,7 @@ def add_sensor_to_dataset(ds_og1, sensor_dict, firstrun=False) -> xr.Dataset:
           SENSOR_<SENSOR_TYPE>_<SERIAL>
     - Attributes for each sensor variable are added from sensor_dict.
     - `sensor_info["variables"]` is handled later (point 3).
+
     """
     # -------------------------------------------------------------------------
     # 1. Create dimensionless sensor variables in the dataset
@@ -177,7 +178,9 @@ def add_sensor_to_dataset(ds_og1, sensor_dict, firstrun=False) -> xr.Dataset:
 
         # Create the variable (dimensionless DataArray)
         if firstrun:
-            print(f"Adding sensor '{sensor_info['sensor_model']}' to the OG1 dataset with attributes")
+            print(
+                f"Adding sensor '{sensor_info['sensor_model']}' to the OG1 dataset with attributes"
+            )
         ds_og1[sensor_var_name] = xr.DataArray(sensor_info["sensor_model"])
 
         # ---------------------------------------------------------------------
@@ -400,8 +403,7 @@ def _del_capital_letters(string):
 
 
 def find_variables_for_sensor(ds, sensor_dict):
-    """
-    Finds variables in the dataset that belong to each sensor based on naming patterns or dimensions.
+    """Finds variables in the dataset that belong to each sensor based on naming patterns or dimensions.
     For each sensor, looks for variables that either have an 'instrument' attribute matching the sensor name, or have a dimension named '{sensor_name}_data_point'.
 
     Parameters
@@ -415,21 +417,25 @@ def find_variables_for_sensor(ds, sensor_dict):
     -------
     dict:
         Updated sensor_dict with a list of variables associated with each sensor.
+
     """
     for sensor_name in sensor_dict.keys():
         variables = []
         for var_name in ds.variables:
             variable = ds[var_name]
-            if "instrument" in variable.attrs and variable.attrs['instrument'] == sensor_name:
+            if (
+                "instrument" in variable.attrs
+                and variable.attrs["instrument"] == sensor_name
+            ):
                 ## only keep the part of the variable name that comes after the sensor name, e.g. 'eng_wlbb2fl_sig695nm' becomes 'sig695nm'
-                #var_name_clean = var_name.replace("eng_", "").replace(f"{sensor_name}_", "").replace("aander","")
+                # var_name_clean = var_name.replace("eng_", "").replace(f"{sensor_name}_", "").replace("aander","")
                 variables.append(var_name)
             elif f"{sensor_name}_data_point" in variable.sizes:
-                #var_name_clean = var_name.replace("eng_", "").replace(f"{sensor_name}_", "").replace("aander","")
+                # var_name_clean = var_name.replace("eng_", "").replace(f"{sensor_name}_", "").replace("aander","")
                 variables.append(var_name)
-        sensor_variables = list(set(variables)) # Remove duplicates
-        #sensor_variables = [standard_names[var] for var in variables if var in standard_names]
-        sensor_dict[sensor_name]['variables'] = sensor_variables
+        sensor_variables = list(set(variables))  # Remove duplicates
+        # sensor_variables = [standard_names[var] for var in variables if var in standard_names]
+        sensor_dict[sensor_name]["variables"] = sensor_variables
 
     return sensor_dict
 
@@ -1250,12 +1256,11 @@ def add_hdm_parameters(ds_OG1, hdm_parameters):
 
 
 def parse_8_digit_date(date_str):
-    """
-    Validates and formats 8-digit strings.
+    """Validates and formats 8-digit strings.
     Prioritizes YYYY-MM-DD, then DD-MM-YYYY based on realistic ranges.
     """
     # Extract only the digits
-    d = "".join(re.findall(r'\d', date_str))
+    d = "".join(re.findall(r"\d", date_str))
     if len(d) != 8:
         return None
 
@@ -1278,18 +1283,23 @@ def parse_8_digit_date(date_str):
 
     return "Format Error"
 
+
 def extract_instrument_info(input_string):
 
-    if input_string is None or not isinstance(input_string, str) or input_string.strip() == "":
+    if (
+        input_string is None
+        or not isinstance(input_string, str)
+        or input_string.strip() == ""
+    ):
         return "0000", "00-00-0000"
 
-    s = input_string.replace(',', ' ').replace(';', ' ')
+    s = input_string.replace(",", " ").replace(";", " ")
 
     # 1. EXTRACT SERIAL NUMBER (DIGITS ONLY)
     sn_patterns = [
-        r'(?i)(?:s/n|sn|serial\s*#|serialnum)[:\s]*([\w-]+)',
-        r'(?i)SBE\s+([\d-]+)',
-        r'(?i)SN([\d-]+)'
+        r"(?i)(?:s/n|sn|serial\s*#|serialnum)[:\s]*([\w-]+)",
+        r"(?i)SBE\s+([\d-]+)",
+        r"(?i)SN([\d-]+)",
     ]
 
     raw_sn = ""
@@ -1301,22 +1311,24 @@ def extract_instrument_info(input_string):
 
     # Strip letters and dashes, keeping only the numbers
     if raw_sn:
-        serial_number = "".join(re.findall(r'\d+', raw_sn))
+        serial_number = "".join(re.findall(r"\d+", raw_sn))
     else:
         serial_number = "0000"
 
     # 2. EXTRACT CALIBRATION DATES
-    multi_match = re.findall(r'(\w+):(\d{4}-\d{2}-\d{2}T[\d:]+Z)', s)
+    multi_match = re.findall(r"(\w+):(\d{4}-\d{2}-\d{2}T[\d:]+Z)", s)
 
     if multi_match:
-        cal_info = ", ".join([f"{m[0]}: {parser.parse(m[1]).strftime('%Y-%m-%d')}" for m in multi_match])
+        cal_info = ", ".join(
+            [f"{m[0]}: {parser.parse(m[1]).strftime('%Y-%m-%d')}" for m in multi_match]
+        )
     else:
-        parts = re.split(r'(?i)cal(?:ibration)?[:\s]*', s)
+        parts = re.split(r"(?i)cal(?:ibration)?[:\s]*", s)
         if len(parts) > 1:
             date_candidate = parts[1].strip()
 
             # Handle the specific 8-digit date requirement (29082012 -> 2908-20-12)
-            digit_only_date = "".join(re.findall(r'\d', date_candidate))
+            digit_only_date = "".join(re.findall(r"\d", date_candidate))
             if len(digit_only_date) == 8 and "?" not in date_candidate:
                 cal_info = parse_8_digit_date(date_candidate)
             elif "?" in date_candidate:
@@ -1324,7 +1336,7 @@ def extract_instrument_info(input_string):
             else:
                 try:
                     dt = parser.parse(date_candidate, fuzzy=True, dayfirst=True)
-                    cal_info = dt.strftime('%Y-%m-%d')
+                    cal_info = dt.strftime("%Y-%m-%d")
                 except:
                     cal_info = "Format Error"
         else:
@@ -1334,14 +1346,21 @@ def extract_instrument_info(input_string):
     if cal_info not in ["None Found", "Format Error", "0000-00-00"]:
         try:
             dt = parser.parse(cal_info, fuzzy=True, dayfirst=True)
-            if dt.year < 1900 or dt.year > date.today().year or dt.month > 12 or dt.day > 31:
+            if (
+                dt.year < 1900
+                or dt.year > date.today().year
+                or dt.month > 12
+                or dt.day > 31
+            ):
                 # Try parsing with year first
                 dt = parser.parse(cal_info, fuzzy=True, yearfirst=True)
-                cal_info = dt.strftime('%Y-%m-%d')
+                cal_info = dt.strftime("%Y-%m-%d")
         except:
             pass
 
     return serial_number, cal_info
+
+
 # ===============================================================================
 # Unused functions
 # ===============================================================================

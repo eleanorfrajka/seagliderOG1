@@ -308,6 +308,7 @@ def list_files(
     ------
     ValueError
         If source is neither a valid URL nor directory path.
+
     """
     if source.startswith("http://") or source.startswith("https://"):
         # List all files in the URL directory
@@ -339,8 +340,7 @@ def scan_and_repair_files(
     start_profile: int | None = None,
     end_profile: int | None = None,
 ) -> None:
-    """
-    Scan NetCDF files and repair inconsistent time metadata only when needed.
+    """Scan NetCDF files and repair inconsistent time metadata only when needed.
 
     Parameters
     ----------
@@ -354,6 +354,7 @@ def scan_and_repair_files(
     Returns
     -------
     None
+
     """
     file_list = list_files(source)
     filtered_files = filter_files_by_profile(file_list, start_profile, end_profile)

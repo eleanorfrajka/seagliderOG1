@@ -8,7 +8,6 @@ variable renaming, attribute assignments, and dataset standardization.
 import logging
 import os
 from datetime import datetime
-from turtle import pd
 
 import numpy as np
 import xarray as xr
@@ -55,9 +54,7 @@ def convert_to_OG1(
     # But we need to process them first to get the dive number, assign GPS (could be after), ?
     for ds1_base in tqdm(list_of_datasets, desc="Processing datasets", unit="dataset"):
         varlist = list(set(varlist + list(ds1_base.variables)))
-        ds_new, attr_warnings = process_dataset(
-            ds1_base, firstrun
-        )
+        ds_new, attr_warnings = process_dataset(ds1_base, firstrun)
         if ds_new:
             processed_datasets.append(ds_new)
             firstrun = False
@@ -140,8 +137,8 @@ def convert_to_OG1(
     # CHECK LOGIC HERE: Should we be using the first and last time from the first and last dive?
     # Or is time_coverage_start from the base station file a better time to use?
     # Or is there an earlier TIME_GPS timestamp?
-    tstart_in_numpy_datetime64 = ds_og1['TIME'][0]
-    tend_in_numpy_datetime64 = ds_og1['TIME'][-1]
+    tstart_in_numpy_datetime64 = ds_og1["TIME"][0]
+    tend_in_numpy_datetime64 = ds_og1["TIME"][-1]
     tstart_str = utilities._clean_time_string(
         np.datetime_as_string(tstart_in_numpy_datetime64, unit="s")
     )
@@ -182,6 +179,8 @@ def convert_to_OG1(
 
 
 _log = logging.getLogger(__name__)
+
+
 def process_dataset(ds1_base: xr.Dataset, firstrun: bool = False) -> tuple[
     xr.Dataset,  # Processed dataset with renamed variables, assigned attributes, and additional information
     list[str],  # List of warnings related to attribute assignments
@@ -239,9 +238,12 @@ def process_dataset(ds1_base: xr.Dataset, firstrun: bool = False) -> tuple[
     if ds1_base is None or len(ds1_base.variables) == 0:
         return xr.Dataset(), []
     ## Add default dimension sg_data_point
-    dims_to_merge = ['sg_data_point']
+    dims_to_merge = ["sg_data_point"]
     # add the dimensions that match the instrument names to the list
-    dims, instruments = list(ds1_base.sizes), ds1_base.attrs.get("instrument", "").split()
+    dims, instruments = (
+        list(ds1_base.sizes),
+        ds1_base.attrs.get("instrument", "").split(),
+    )
     for instrument in instruments:
         if instrument + "_data_point" in dims:
             dims_to_merge.append(instrument + "_data_point")
@@ -291,6 +293,7 @@ def process_dataset(ds1_base: xr.Dataset, firstrun: bool = False) -> tuple[
 
     attr_warnings = ""
     return ds_new, attr_warnings
+
 
 def standardise_OG10(
     ds: xr.Dataset,
@@ -903,6 +906,7 @@ def process_and_save_data(
     -------
     xarray.Dataset
         The processed dataset.
+
     """
     # Load and concatenate all datasets from the server
     ds1_base = readers.load_first_basestation_file(input_location)
