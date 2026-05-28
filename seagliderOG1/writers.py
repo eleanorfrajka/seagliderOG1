@@ -44,7 +44,23 @@ def save_dataset(ds: xr.Dataset, output_file: str = "../test.nc") -> None:
                     )
 
     try:
-        ds.to_netcdf(output_file, format="NETCDF4")
+        time_vars = [
+            name
+            for name in list(ds.data_vars) + list(ds.coords)
+            if np.issubdtype(ds[name].dtype, np.datetime64)
+        ]
+
+        encoding = {
+            name: {
+                "units": "seconds since 1970-01-01 00:00:00",
+                "calendar": "standard",
+                "dtype": "float64",
+            }
+            for name in time_vars
+        }
+
+        ds.to_netcdf(output_file, encoding=encoding, format="NETCDF4")
+        # ds.to_netcdf(output_file, format="NETCDF4")
         return True
 
     except TypeError as e:
