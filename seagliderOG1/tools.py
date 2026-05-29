@@ -1,295 +1,202 @@
 import logging
 import re
+from dateutil import parser
+from datetime import date
 
 import gsw
 import numpy as np
 import pandas as pd
 import xarray as xr
 
-from seagliderOG1 import utilities, vocabularies
+from seagliderOG1 import vocabularies
 
 _log = logging.getLogger(__name__)
 
-variables_sensors = {
-    "CNDC": "CTD",
-    "DOXY": "dissolved gas sensors",
-    "PRES": "CTD",
-    "PSAL": "CTD",
-    "TEMP": "CTD",
-    "BBP700": "fluorometers",
-    "CHLA": "fluorometers",
-    "PRES_ADCP": "ADVs and turbulence probes",
-}
 
+def gather_sensor_info(ds1_base) -> dict:
+    """Gathers sensor information from an OG1 base dataset.
 
-# EFW 2025-01-01: This could be improved
-# Sensor information is contained in the basestation file as a variable (e.g., 'wlbb2f') or
-# in the sg_cal strings, e.g. calibcomm_oxygen or calibcomm_optode contains 'SBE 43F' or 'Optode 4330F'
-# Using this, and the presence of calibration coefficients (e.g., optode_FoilCoefA1), we can make
-# a guess as to the sensor type
-def gather_sensor_info(
-    ds_other: xr.Dataset, ds_sgcal: xr.Dataset, firstrun: bool = False
-) -> xr.Dataset:
-    """Gathers sensor information from the provided datasets and organizes it into a new dataset.
+    Extracts:
+      - sensor names (from global 'instrument' attribute)
+      - technical specs (from OG1_sensor_attrs.yaml vocabularies)
+      - serial numbers + calibration dates (from calibcomm variables)
+      - variables belonging to each sensor
 
     Parameters
     ----------
-    ds_other
-        The dataset containing sensor data.
-    ds_sgcal
-        The dataset containing calibration data.
-    firstrun, optional
-        A flag indicating if this is the first run. Default is False.
+    ds1_base : xarray.Dataset
+        The raw base dataset containing sensor metadata.
+    first_run : bool
+        If True, informational print statements are shown.
+
+    Returns
+    -------
+    dict
+        Dictionary with one key per sensor, each containing metadata.
+
+    """
+    # -------------------------------------------------------------------------
+    # 1. Extract sensor names from the 'instrument' global attribute
+    # -------------------------------------------------------------------------
+    sensor_dict = {}
+
+    if "instrument" in ds1_base.attrs:
+        sensor_names = ds1_base.attrs["instrument"].split()
+        # Remove unneeded entries
+        if "magnetometer" in sensor_names:
+            sensor_names.remove("magnetometer")
+        # Initialize dictionary entries
+        for sensor in sensor_names:
+            sensor_dict[sensor] = {}
+    else:
+
+        print(
+            "Warning: 'instrument' attribute not found in the dataset. Therefore no sensor information extracted from attributes. "
+            "If you have sensor information in the attributes, please add an 'instrument' attribute with the sensor names separated by spaces."
+            " For example: ds.attrs['instrument'] = 'sbe41 wlbb2f sbe43'"
+        )
+        return sensor_dict
+
+    # -------------------------------------------------------------------------
+    # 2. Add technical specifications from OG1 vocabularies
+    # -------------------------------------------------------------------------
+    standard_names = vocabularies.standard_names
+    sensor_vocabs = vocabularies.sensor_vocabs
+
+    for sensor in sensor_dict.keys():
+        if sensor in standard_names:
+            new_name = standard_names[sensor]
+            sensor_dict[sensor] = sensor_vocabs[new_name]
+            print(
+                f"Adding technical specifications for '{new_name}' "
+                f"(sensor key: '{sensor}') from OG1_sensor_attrs.yaml"
+            )
+        else:
+            print(
+                f"Warning: Sensor '{sensor}' not found in standard names vocabulary. "
+                "No technical specifications added."
+            )
+
+    # -------------------------------------------------------------------------
+    # 3. Extract calibration information (serial number + calibration dates)
+    # -------------------------------------------------------------------------
+    def get_if_exists(base, varname):
+        return base[varname] if varname in base.variables else None
+
+    sensor_nums = len(sensor_dict.keys())
+    available_calibcomm = [
+        v for v in ds1_base.variables if v.startswith("sg_cal_calibcomm")
+    ]
+    if len(available_calibcomm) > sensor_nums:
+        print(
+            f"Warning: More calibration variables found as stated in instrument attributes!\n"
+            f"The following calibration variables were found: {available_calibcomm}\n"
+            f"But only {sensor_nums} sensors were listed in the instrument attributes: {list(sensor_dict.keys())}"
+        )
+
+    for sensor in sensor_dict.keys():
+
+        # --- Determine calibcomm variable name --------------------------------
+        calibcomm_str = None
+        base = ds1_base
+        del_caps = _del_capital_letters(sensor)
+
+        calibcomm_str = None
+        var = get_if_exists(base, f"sg_cal_calibcomm_{sensor}")
+        if var is not None:
+            calibcomm_str = str(var.values.item())
+
+        elif (var := get_if_exists(base, f"sg_cal_calibcomm_{del_caps}")) is not None:
+            calibcomm_str = str(var.values.item())
+
+        elif sensor_dict[sensor].get("sensor_type") == "CTD":
+            var = get_if_exists(base, "sg_cal_calibcomm")
+            calibcomm_str = str(var.values.item()) if var is not None else None
+
+        elif sensor_dict[sensor].get("sensor_type") == "Oxygen":
+            var = get_if_exists(base, "sg_cal_calibcomm_optode") or get_if_exists(
+                base, "sg_cal_calibcomm_oxygen"
+            )
+            calibcomm_str = str(var.values.item()) if var is not None else None
+
+        elif sensor_dict[sensor].get("sensor_maker") == "WET Labs":
+            var = get_if_exists(base, "sg_cal_calibcomm_wetlabs")
+            calibcomm_str = str(var.values.item()) if var is not None else None
+
+        if calibcomm_str is None:
+            print(
+                f"Warning: No calibration info found for sensor '{sensor}'. "
+                f"Available calibration variables: {available_calibcomm}"
+            )
+
+        # --- Extract serial number + calibration date --------------------------
+        serial_number, cal_info = extract_instrument_info(calibcomm_str)
+
+        sensor_dict[sensor]["sensor_serial_number"] = serial_number
+        sensor_dict[sensor]["sensor_calibration_date"] = cal_info
+
+    # -------------------------------------------------------------------------
+    # 4. Assign variables to sensors based on naming patterns or dimensions
+    # -------------------------------------------------------------------------
+    sensor_dict = find_variables_for_sensor(ds1_base, sensor_dict)
+
+    return sensor_dict
+
+
+def add_sensor_to_dataset(ds_og1, sensor_dict, firstrun=False) -> xr.Dataset:
+    """Adds sensor information from the provided sensor dictionary to the OG1 dataset.
+
+    Parameters
+    ----------
+    ds_og1 : xarray.Dataset
+        The OG1 dataset to which sensor information will be added.
+    sensor_dict : dict
+        A dictionary containing sensor metadata and associated variables.
 
     Returns
     -------
     xarray.Dataset
-        A dataset containing the gathered sensor information.
+        The updated OG1 dataset with new sensor metadata variables added.
 
     Notes
     -----
-    - The function looks for specific sensor names in the `ds_other` dataset and adds them to a new dataset `ds_sensor`.
-    - If 'aanderaa4330_instrument_dissolved_oxygen' is present in `ds_other`, it is renamed to 'aa4330'.
-    - If 'Pcor' is present in `ds_sgcal`, an additional sensor 'sbe43' is created based on 'sbe41' with specific attributes.
-    - If 'optode_FoilCoefA1' is present in `ds_sgcal`, an additional sensor 'aa4831' is created based on 'sbe41' with specific attributes.
-    - The function sets appropriate attributes for the sensors 'aa4330', 'aa4831', and 'sbe43' if they are present.
+    - Each sensor becomes a new dimensionless variable:
+          SENSOR_<SENSOR_TYPE>_<SERIAL>
+    - Attributes for each sensor variable are added from sensor_dict.
+    - `sensor_info["variables"]` is handled later (point 3).
 
     """
-    # Gather sensors
-    sensor_names = ["wlbb2f", "sbe41", "aa4330", "aa4381", "aa4330f", "aa4381f"]
+    # -------------------------------------------------------------------------
+    # 1. Create dimensionless sensor variables in the dataset
+    # -------------------------------------------------------------------------
+    for _, sensor_info in sensor_dict.items():
 
-    ds_sensor = xr.Dataset()
-    if "aanderaa4330_instrument_dissolved_oxygen" in ds_other.variables:
-        ds_other["aa4330"] = ds_other["aanderaa4330_instrument_dissolved_oxygen"]
-    for sensor in sensor_names:
-        if sensor in ds_other:
-            ds_sensor[sensor] = ds_other[sensor]
+        # Build sensor variable name
+        sensor_type = sensor_info["sensor_type"].upper().replace(" ", "_")
+        serial = sensor_info["sensor_serial_number"]
+        sensor_var_name = f"SENSOR_{sensor_type}_{serial}"
 
-    if "Pcor" in ds_sgcal:
-        ds_sensor["sbe43"] = ds_sensor["sbe41"]
-        ds_sensor["sbe43"].attrs["long_name"] = "Sea-Bird SBE 43F Oxygen Sensor"
-        ds_sensor["sbe43"].attrs[
-            "ancillary_variables"
-        ] = "sg_cal_Pcor sg_cal_Foffset sg_cal_A sg_cal_B sg_cal_C sg_cal_E sg_cal_Soc"
-
-    aanderaa_ancillary = "optode_FoilCoefA1 optode_FoilCoefA2	optode_FoilCoefA3 optode_FoilCoefA4	optode_FoilCoefA5 optode_FoilCoefA6 optode_FoilCoefA7 optode_FoilCoefA8 optode_FoilCoefA9 optode_FoilCoefA10 optode_FoilCoefA11	optode_FoilCoefA12 optode_FoilCoefA13 optode_FoilCoefB1	optode_FoilCoefB2 optode_FoilCoefB3	optode_FoilCoefB4 optode_FoilCoefB5	 optode_FoilCoefB6 optode_PhaseCoef0 optode_PhaseCoef1 optode_PhaseCoef2 optode_PhaseCoef3 optode_ConcCoef0 optode_ConcCoef1 optode_SVU_enabled optode_TempCoef0 optode_TempCoef1 optode_TempCoef2 optode_TempCoef3 optode_TempCoef4 optode_TempCoef5"
-    if "optode_FoilCoefA1" in ds_sgcal:
-        ds_sensor["aa4831"] = ds_sensor["sbe41"]
-        ds_sensor["aa4831"].attrs["long_name"] = "Aanderaa 4831F Oxygen Sensor"
-        ds_sensor["aa4831"].attrs["ancillary_variables"] = aanderaa_ancillary
-    if "aa4330" in ds_sensor.variables:
-        ds_sensor["aa4330"].attrs["long_name"] = "Aanderaa 4330 Oxygen Sensor"
-        ds_sensor["aa4330"].attrs["ancillary_variables"] = aanderaa_ancillary
-
-
-def add_sensor_to_dataset(
-    dsa: xr.Dataset, ds: xr.Dataset, sg_cal: xr.Dataset, firstrun: bool = False
-) -> xr.Dataset:
-    """Add sensor information to the dataset based on instrument data and calibration parameters.
-
-    This function processes different types of seaglider sensors including CTD (sbe41),
-    oxygen sensors (sbe43, aa4381, aa4330), and optical sensors (wlbb2f). For each sensor,
-    it extracts calibration information, parses serial numbers and calibration dates,
-    and creates sensor variables with appropriate attributes and metadata.
-
-    Parameters
-    ----------
-    dsa
-        The target dataset to add sensor information to.
-    ds
-        Dataset containing instrument/sensor data with attributes.
-    sg_cal
-        Dataset containing calibration information and calibcomm strings.
-    firstrun, optional
-        Whether to enable detailed logging for debugging. Default is False.
-
-    Returns
-    -------
-    xarray.Dataset
-        The updated dataset with sensor variables and metadata added.
-
-    Notes
-    -----
-    - Handles CTD sensors by parsing calibcomm strings for serial numbers and dates
-    - Processes oxygen sensors using calibcomm_oxygen or calibcomm_optode information
-    - Creates sensor variable names in format: 'SENSOR_{type}_{serial}'
-    - Skips altimeter sensors as they are not processed in current implementation
-    - For wlbb2f sensors, calibration parsing is commented out pending data availability
-
-    """
-    if ds is None:
-        return dsa
-    sensors = list(ds)
-    sensor_name_type = {}
-    for instr in sensors:
+        # Create the variable (dimensionless DataArray)
         if firstrun:
-            _log.info(instr)
-        if instr in ["altimeter"]:
-            continue
-        attr_dict = ds[instr].attrs
-        # Code to parse details from sg_cal and calibcomm into the attributes for CTD
-        if instr == "sbe41":
-            if attr_dict["make_model"] == "unpumped Seabird SBE41":
-                attr_dict["make_model"] = "Seabird unpumped CTD"
-            if attr_dict["make_model"] not in vocabularies.sensor_vocabs.keys():
-                _log.error(f"sensor {attr_dict['make_model']} not found")
-            var_dict = vocabularies.sensor_vocabs[attr_dict["make_model"]]
+            print(
+                f"Adding sensor '{sensor_info['sensor_model']}' to the OG1 dataset with attributes"
+            )
+        ds_og1[sensor_var_name] = xr.DataArray(sensor_info["sensor_model"])
 
-            calstr = sg_cal["calibcomm"].values.item().decode("utf-8")
-            if firstrun:
-                _log.info(f"sg_cal_calibcomm: {calstr}")
-                print(f"sg_cal_calibcomm: {calstr}")
+        # ---------------------------------------------------------------------
+        # 2. Add sensor attributes (except 'variables')
+        # ---------------------------------------------------------------------
+        for attr, value in sensor_info.items():
+            if attr == "variables":
+                continue
+            ds_og1[sensor_var_name].attrs[attr] = value
 
-            cal_date, serial_number = utilities._parse_calibcomm(calstr, firstrun)
-            var_dict["serial_number"] = serial_number
-            var_dict["long_name"] += f":{serial_number}"
-            var_dict["calibration_date"] = cal_date
+    # -------------------------------------------------------------------------
+    # 3. Assign 'sensor' attribute to sensor-specific variables (later update)
+    #    Leave logic untouched for now.
+    # -------------------------------------------------------------------------
 
-            if "ancillary_variables" in attr_dict.keys():
-                ancilliary_vars = attr_dict["ancillary_variables"]
-                anc_var_list = utilities._clean_anc_vars_list(
-                    attr_dict["ancillary_variables"]
-                )
-                calvals = utilities._assign_calval(sg_cal, anc_var_list)
-                var_dict["calibration_parameters"] = calvals
-            da = xr.DataArray(attrs=var_dict)
-            if serial_number is not None:
-                sensor_var_name = (
-                    f"sensor_{var_dict['sensor_type']}_{serial_number}".upper().replace(
-                        " ",
-                        "_",
-                    )
-                )
-            else:
-                sensor_var_name = f"sensor_{var_dict['sensor_type']}".upper().replace(
-                    " ",
-                    "_",
-                )
-            dsa[sensor_var_name] = da
-            sensor_name_type[var_dict["sensor_type"]] = sensor_var_name
-
-        # Handle oxygen sensor
-        optode_flag = False
-        if instr == "sbe43":
-            attr_dict["make_model"] = "Seabird SBE43F"
-            if attr_dict["make_model"] not in vocabularies.sensor_vocabs.keys():
-                _log.error(f"sensor {attr_dict['make_model']} not found")
-            var_dict = vocabularies.sensor_vocabs[attr_dict["make_model"]]
-            optode_flag = True
-        if instr == "aa4381":
-            attr_dict["make_model"] = "Aanderaa 4381"
-            if attr_dict["make_model"] not in vocabularies.sensor_vocabs.keys():
-                _log.error(f"sensor {attr_dict['make_model']} not found")
-            var_dict = vocabularies.sensor_vocabs[attr_dict["make_model"]]
-            optode_flag = True
-        if instr == "aa4330":
-            attr_dict["make_model"] = "Aanderaa 4330"
-            if attr_dict["make_model"] not in vocabularies.sensor_vocabs.keys():
-                _log.error(f"sensor {attr_dict['make_model']} not found")
-            var_dict = vocabularies.sensor_vocabs[attr_dict["make_model"]]
-            optode_flag = True
-
-        if optode_flag:
-            if "calibcomm_oxygen" in sg_cal:
-                calstr = sg_cal["calibcomm_oxygen"].values.item().decode("utf-8")
-                if firstrun:
-                    _log.info(f"sg_cal_calibcomm_oxygen: {calstr}")
-                    print(f"sg_cal_calibcomm_oxygen: {calstr}")
-
-                cal_date, serial_number = utilities._parse_calibcomm(calstr, firstrun)
-            elif "calibcomm_optode" in sg_cal:
-                calstr = sg_cal["calibcomm_optode"].values.item().decode("utf-8")
-                if firstrun:
-                    _log.info(f"sg_cal_calibcomm_optode: {calstr}")
-                    print(f"sg_cal_calibcomm_optode: {calstr}")
-
-                cal_date, serial_number = utilities._parse_calibcomm(calstr, firstrun)
-            var_dict["serial_number"] = serial_number
-            var_dict["long_name"] += f":{serial_number}"
-            var_dict["calibration_date"] = cal_date
-
-            # All the sg_cal_optode_*
-            if "ancillary_variables" in attr_dict.keys():
-                ancilliary_vars = attr_dict["ancillary_variables"]
-                anc_var_list = utilities._clean_anc_vars_list(
-                    attr_dict["ancillary_variables"]
-                )
-                calvals = utilities._assign_calval(sg_cal, anc_var_list)
-                var_dict["calibration_parameters"] = calvals
-
-            da = xr.DataArray(attrs=var_dict)
-            if serial_number is not None:
-                sensor_var_name = (
-                    f"sensor_{var_dict['sensor_type']}_{serial_number}".upper().replace(
-                        " ",
-                        "_",
-                    )
-                )
-            else:
-                sensor_var_name = f"sensor_{var_dict['sensor_type']}".upper().replace(
-                    " ",
-                    "_",
-                )
-            dsa[sensor_var_name] = da
-            sensor_name_type[var_dict["sensor_type"]] = sensor_var_name
-
-        if instr == "wlbb2f":
-            if attr_dict["make_model"] == "Wetlabs backscatter fluorescence puck":
-                attr_dict["make_model"] = "Wetlabs BB2FL-VMT"
-            if attr_dict["make_model"] not in vocabularies.sensor_vocabs.keys():
-                _log.error(f"sensor {attr_dict['make_model']} not found")
-            var_dict = vocabularies.sensor_vocabs[attr_dict["make_model"]]
-
-            #   Not in sample dataset - see whether more recent files have calibration information
-            #        cal_date, serial_number = utilities._parse_calibcomm(sg_cal['calibcomm'])
-            #        if serial_number is not None:
-            #            var_dict["serial_number"] = serial_number
-            #            var_dict["long_name"] += f":{serial_number}"
-            #        if cal_date is not None:
-            #            var_dict["calibration_date"] = cal_date
-            serial_number = None
-
-            da = xr.DataArray(attrs=var_dict)
-            if serial_number:
-                sensor_var_name = (
-                    f"sensor_{var_dict['sensor_type']}_{serial_number}".upper().replace(
-                        " ",
-                        "_",
-                    )
-                )
-            else:
-                sensor_var_name = f"sensor_{var_dict['sensor_type']}".upper().replace(
-                    " ",
-                    "_",
-                )
-            dsa[sensor_var_name] = da
-            sensor_name_type[var_dict["sensor_type"]] = sensor_var_name
-
-            if "ancillary_variables" in attr_dict.keys():
-                ancilliary_vars = attr_dict["ancillary_variables"]
-                anc_var_list = utilities._clean_anc_vars_list(
-                    attr_dict["ancillary_variables"]
-                )
-                calvals = utilities._assign_calval(sg_cal, anc_var_list)
-                var_dict["calibration_parameters"] = calvals
-            da = xr.DataArray(attrs=var_dict)
-            if serial_number is not None:
-                sensor_var_name = (
-                    f"sensor_{var_dict['sensor_type']}_{serial_number}".upper().replace(
-                        " ",
-                        "_",
-                    )
-                )
-            else:
-                sensor_var_name = f"sensor_{var_dict['sensor_type']}".upper().replace(
-                    " ",
-                    "_",
-                )
-            if firstrun:
-                _log.info("Adding sensor:", sensor_var_name)
-            dsa[sensor_var_name] = da
-            sensor_name_type[var_dict["sensor_type"]] = sensor_var_name
-    return dsa
+    return ds_og1
 
 
 def add_dive_number(ds: xr.Dataset, dive_number: int | None = None) -> xr.Dataset:
@@ -491,6 +398,48 @@ def assign_phase(ds: xr.Dataset) -> xr.Dataset:
     return ds
 
 
+def _del_capital_letters(string):
+    return "".join([char for char in string if not char.isupper()])
+
+
+def find_variables_for_sensor(ds, sensor_dict):
+    """Finds variables in the dataset that belong to each sensor based on naming patterns or dimensions.
+    For each sensor, looks for variables that either have an 'instrument' attribute matching the sensor name, or have a dimension named '{sensor_name}_data_point'.
+
+    Parameters
+    ----------
+    ds : xarray.Dataset
+        The dataset to search for variables.
+    sensor_dict : dict
+        Dictionary containing sensor metadata, used to identify sensor names.
+
+    Returns
+    -------
+    dict:
+        Updated sensor_dict with a list of variables associated with each sensor.
+
+    """
+    for sensor_name in sensor_dict.keys():
+        variables = []
+        for var_name in ds.variables:
+            variable = ds[var_name]
+            if (
+                "instrument" in variable.attrs
+                and variable.attrs["instrument"] == sensor_name
+            ):
+                ## only keep the part of the variable name that comes after the sensor name, e.g. 'eng_wlbb2fl_sig695nm' becomes 'sig695nm'
+                # var_name_clean = var_name.replace("eng_", "").replace(f"{sensor_name}_", "").replace("aander","")
+                variables.append(var_name)
+            elif f"{sensor_name}_data_point" in variable.sizes:
+                # var_name_clean = var_name.replace("eng_", "").replace(f"{sensor_name}_", "").replace("aander","")
+                variables.append(var_name)
+        sensor_variables = list(set(variables))  # Remove duplicates
+        # sensor_variables = [standard_names[var] for var in variables if var in standard_names]
+        sensor_dict[sensor_name]["variables"] = sensor_variables
+
+    return sensor_dict
+
+
 ##-----------------------------------------------------------------------------------------------------------
 ## Calculations for new variables
 ##-----------------------------------------------------------------------------------------------------------
@@ -531,28 +480,6 @@ def calc_Z(ds: xr.Dataset) -> xr.Dataset:
     return ds
 
 
-def get_sg_attrs(ds: xr.Dataset) -> dict:
-    """Extract seaglider attributes and calibration information into a dictionary.
-
-    Parameters
-    ----------
-    ds
-        Dataset containing seaglider attributes and calibration data.
-
-    Returns
-    -------
-    dict
-        Dictionary containing seaglider variables and their attributes.
-
-    """
-    id = ds.attrs["id"]
-    sg_cal, _, _ = extract_variables(ds)
-    sg_vars_dict = {}
-    for var, data in sg_cal.items():
-        sg_vars_dict[var] = {attr: data.attrs.get(attr, "") for attr in data.attrs}
-    return sg_vars_dict
-
-
 def split_by_unique_dims(ds: xr.Dataset) -> dict:
     """Splits an xarray dataset into multiple datasets based on the unique set of dimensions of the variables.
 
@@ -583,52 +510,6 @@ def split_by_unique_dims(ds: xr.Dataset) -> dict:
 
     # Convert the dictionary values to a dictionary of datasets
     return {dims: dataset for dims, dataset in unique_dims_datasets.items()}
-
-
-def convert_units(ds: xr.Dataset) -> xr.Dataset:
-    """Convert the units of variables in an xarray Dataset to preferred units.
-
-    This is useful, for instance, to convert cm/s to m/s based on vocabulary
-    specifications.
-
-    Parameters
-    ----------
-    ds
-        The dataset containing variables to convert.
-
-    Returns
-    -------
-    xarray.Dataset
-        The dataset with converted units.
-
-    """
-    """
-    Convert the units of variables in an xarray Dataset to preferred units.  This is useful, for instance, to convert cm/s to m/s.
-
-    Parameters
-    ----------
-    ds (xarray.Dataset): The dataset containing variables to convert.
-
-    Returns
-    -------
-    xarray.Dataset: The dataset with converted units.
-    """
-
-    for var in ds.variables:
-        var_values = ds[var].values
-        orig_unit = ds[var].attrs.get("units")
-        if "units" in vocabularies.vocab_attrs[OG1_name]:
-            new_unit = vocabularies.vocab_attrs[OG1_name].get("units")
-            if orig_unit != new_unit:
-
-                var_values, new_unit = convert_units_var(
-                    var_values, orig_unit, new_unit
-                )
-
-                ds[var].values = var_values
-                ds[var].attrs["units"] = new_unit
-
-    return ds
 
 
 def reformat_units_var(
@@ -1087,7 +968,6 @@ def merge_parts_of_dataset(
 
     # Sort by time and drop NaT values
     merged_ds = merged_ds.sortby("time").dropna(dim=dim1, subset=["time"])
-
     return merged_ds
 
 
@@ -1373,6 +1253,112 @@ def add_hdm_parameters(ds_OG1, hdm_parameters):
             ds_updated[param_name].attrs = attributes
 
     return ds_updated
+
+
+def parse_8_digit_date(date_str):
+    """Validates and formats 8-digit strings.
+    Prioritizes YYYY-MM-DD, then DD-MM-YYYY based on realistic ranges.
+    """
+    # Extract only the digits
+    d = "".join(re.findall(r"\d", date_str))
+    if len(d) != 8:
+        return None
+
+    # Try YYYYMMDD (Standard ISO-like)
+    # Year: 1900-2099, Month: 01-12, Day: 01-31
+    y, m, day = int(d[:4]), int(d[4:6]), int(d[6:])
+    if 1900 <= y < date.today().year and 1 <= m <= 12 and 1 <= day <= 31:
+        return f"{y:04d}-{m:02d}-{day:02d}"
+
+    # Try DDMMYYYY (European style)
+    # Day: 01-31, Month: 01-12, Year: 1900-2099
+    day, m, y = int(d[:2]), int(d[2:4]), int(d[4:])
+    if 1900 <= y < date.today().year and 1 <= m <= 12 and 1 <= day <= 31:
+        return f"{y:04d}-{m:02d}-{day:02d}"
+
+    # Try MMDDYYYY (US style)
+    m, day, y = int(d[:2]), int(d[2:4]), int(d[4:])
+    if 1900 <= y < date.today().year and 1 <= m <= 12 and 1 <= day <= 31:
+        return f"{y:04d}-{m:02d}-{day:02d}"
+
+    return "Format Error"
+
+
+def extract_instrument_info(input_string):
+
+    if (
+        input_string is None
+        or not isinstance(input_string, str)
+        or input_string.strip() == ""
+    ):
+        return "0000", "00-00-0000"
+
+    s = input_string.replace(",", " ").replace(";", " ")
+
+    # 1. EXTRACT SERIAL NUMBER (DIGITS ONLY)
+    sn_patterns = [
+        r"(?i)(?:s/n|sn|serial\s*#|serialnum)[:\s]*([\w-]+)",
+        r"(?i)SBE\s+([\d-]+)",
+        r"(?i)SN([\d-]+)",
+    ]
+
+    raw_sn = ""
+    for pattern in sn_patterns:
+        match = re.search(pattern, s)
+        if match:
+            raw_sn = match.group(1)
+            break
+
+    # Strip letters and dashes, keeping only the numbers
+    if raw_sn:
+        serial_number = "".join(re.findall(r"\d+", raw_sn))
+    else:
+        serial_number = "0000"
+
+    # 2. EXTRACT CALIBRATION DATES
+    multi_match = re.findall(r"(\w+):(\d{4}-\d{2}-\d{2}T[\d:]+Z)", s)
+
+    if multi_match:
+        cal_info = ", ".join(
+            [f"{m[0]}: {parser.parse(m[1]).strftime('%Y-%m-%d')}" for m in multi_match]
+        )
+    else:
+        parts = re.split(r"(?i)cal(?:ibration)?[:\s]*", s)
+        if len(parts) > 1:
+            date_candidate = parts[1].strip()
+
+            # Handle the specific 8-digit date requirement (29082012 -> 2908-20-12)
+            digit_only_date = "".join(re.findall(r"\d", date_candidate))
+            if len(digit_only_date) == 8 and "?" not in date_candidate:
+                cal_info = parse_8_digit_date(date_candidate)
+            elif "?" in date_candidate:
+                cal_info = "0000-00-00"
+            else:
+                try:
+                    dt = parser.parse(date_candidate, fuzzy=True, dayfirst=True)
+                    cal_info = dt.strftime("%Y-%m-%d")
+                except:
+                    cal_info = "Format Error"
+        else:
+            cal_info = "None Found"
+
+    ## if cal_info has unrealistic year, month or day, rearrange so that year is first, then try parsing again
+    if cal_info not in ["None Found", "Format Error", "0000-00-00"]:
+        try:
+            dt = parser.parse(cal_info, fuzzy=True, dayfirst=True)
+            if (
+                dt.year < 1900
+                or dt.year > date.today().year
+                or dt.month > 12
+                or dt.day > 31
+            ):
+                # Try parsing with year first
+                dt = parser.parse(cal_info, fuzzy=True, yearfirst=True)
+                cal_info = dt.strftime("%Y-%m-%d")
+        except:
+            pass
+
+    return serial_number, cal_info
 
 
 # ===============================================================================

@@ -7,6 +7,7 @@ sys.path.append(str(parent_dir))
 
 from seagliderOG1 import readers
 
+
 def test_validate_filename():
     """Test the _validate_filename function from the readers module.
     This test checks the validation of filenames to ensure they meet the expected

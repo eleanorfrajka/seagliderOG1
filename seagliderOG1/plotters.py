@@ -15,7 +15,9 @@ from pandas import DataFrame
 ##------------------------------------------------------------------------------------
 ## Views of the ds or nc file
 ##------------------------------------------------------------------------------------
-def show_contents(data: str | xr.Dataset, content_type: str = "variables") -> pd.DataFrame:
+def show_contents(
+    data: str | xr.Dataset, content_type: str = "variables"
+) -> pd.DataFrame:
     """Show contents of an xarray Dataset or a netCDF file.
 
     Wrapper function to display either variables or attributes from the dataset.
@@ -89,7 +91,6 @@ def show_variables(data: str | xr.Dataset) -> pd.DataFrame:
         If input data is not a file path or xarray Dataset.
 
     """
-
     if isinstance(data, str):
         print("information is based on file: {}".format(data))
         dataset = Dataset(data)
@@ -163,7 +164,6 @@ def show_attributes(data: str | xr.Dataset) -> pd.DataFrame:
         If input data is not a file path or xarray Dataset.
 
     """
-
     if isinstance(data, str):
         print("information is based on file: {}".format(data))
         rootgrp = Dataset(data, "r", format="NETCDF4")
@@ -186,7 +186,9 @@ def show_attributes(data: str | xr.Dataset) -> pd.DataFrame:
     return attrs
 
 
-def show_variables_by_dimension(data: str | xr.Dataset, dimension_name: str = "trajectory") -> pd.DataFrame:
+def show_variables_by_dimension(
+    data: str | xr.Dataset, dimension_name: str = "trajectory"
+) -> pd.DataFrame:
     """Process dataset and extract variables filtered by a specific dimension.
 
     Creates a styled DataFrame showing only variables that have the specified
@@ -212,6 +214,7 @@ def show_variables_by_dimension(data: str | xr.Dataset, dimension_name: str = "t
     ------
     TypeError
         If input data is not a file path or xarray Dataset.
+
     """
     if isinstance(data, str):
         print("information is based on file: {}".format(data))
@@ -342,7 +345,12 @@ def plot_profile_depth(data: pd.DataFrame | xr.Dataset) -> None:
     plt.show()
 
 
-def plot_depth_colored(data: pd.DataFrame | xr.Dataset, color_by: str | None = None, start_dive: int | None = None, end_dive: int | None = None) -> None:
+def plot_depth_colored(
+    data: pd.DataFrame | xr.Dataset,
+    color_by: str | None = None,
+    start_dive: int | None = None,
+    end_dive: int | None = None,
+) -> None:
     """Plot depth as a function of time with optional coloring and dive filtering.
 
     Creates a depth time series plot with optional color coding by another variable
@@ -454,7 +462,9 @@ def plot_depth_colored(data: pd.DataFrame | xr.Dataset, color_by: str | None = N
     plt.show()
 
 
-def plot_ctd_depth_vs_time(ds: xr.Dataset, start_traj: int | None = None, end_traj: int | None = None) -> None:
+def plot_ctd_depth_vs_time(
+    ds: xr.Dataset, start_traj: int | None = None, end_traj: int | None = None
+) -> None:
     """Plot CTD depth vs time with GPS fix highlighting.
 
     Creates a depth time series plot with special highlighting of points where

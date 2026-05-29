@@ -8,7 +8,6 @@ variable renaming, attribute assignments, and dataset standardization.
 import logging
 import os
 from datetime import datetime
-from turtle import pd
 
 import numpy as np
 import xarray as xr
@@ -55,9 +54,7 @@ def convert_to_OG1(
     # But we need to process them first to get the dive number, assign GPS (could be after), ?
     for ds1_base in tqdm(list_of_datasets, desc="Processing datasets", unit="dataset"):
         varlist = list(set(varlist + list(ds1_base.variables)))
-        ds_new, attr_warnings = process_dataset(
-            ds1_base, firstrun
-        )
+        ds_new, attr_warnings = process_dataset(ds1_base, firstrun)
         if ds_new:
             processed_datasets.append(ds_new)
             firstrun = False
@@ -68,8 +65,11 @@ def convert_to_OG1(
 
     ds_og1 = xr.concat(processed_datasets, dim="N_MEASUREMENTS")
     ds_og1 = ds_og1.sortby("TIME")
-    # Change format of time into datetime64[ns] to avoid problems with attributes and writing to netcdf
-    # ds_og1["TIME"] = (ds_og1["TIME"].astype("float64") * 1e9).astype("datetime64[ns]")
+
+    # Add sensor information to the dataset - can be done on the concatenated data
+    # -----------------------------------------------------------------------------
+    sensor_dict = tools.gather_sensor_info(list_of_datasets[0])
+    ds_og1 = tools.add_sensor_to_dataset(ds_og1, sensor_dict)
 
     # Apply attributes
     ordered_attributes = update_dataset_attributes(
@@ -137,8 +137,8 @@ def convert_to_OG1(
     # CHECK LOGIC HERE: Should we be using the first and last time from the first and last dive?
     # Or is time_coverage_start from the base station file a better time to use?
     # Or is there an earlier TIME_GPS timestamp?
-    tstart_in_numpy_datetime64 = ds_og1.TIME[0].values
-    tend_in_numpy_datetime64 = ds_og1.TIME[-1].values
+    tstart_in_numpy_datetime64 = ds_og1["TIME"][0]
+    tend_in_numpy_datetime64 = ds_og1["TIME"][-1]
     tstart_str = utilities._clean_time_string(
         np.datetime_as_string(tstart_in_numpy_datetime64, unit="s")
     )
@@ -179,6 +179,8 @@ def convert_to_OG1(
 
 
 _log = logging.getLogger(__name__)
+
+
 def process_dataset(ds1_base: xr.Dataset, firstrun: bool = False) -> tuple[
     xr.Dataset,  # Processed dataset with renamed variables, assigned attributes, and additional information
     list[str],  # List of warnings related to attribute assignments
@@ -234,20 +236,27 @@ def process_dataset(ds1_base: xr.Dataset, firstrun: bool = False) -> tuple[
     # Check if the dataset has 'LONGITUDE' as a coordinate
     ds1_base = utilities._validate_coords(ds1_base)
     if ds1_base is None or len(ds1_base.variables) == 0:
-        return xr.Dataset(), [], xr.Dataset(), xr.Dataset(), xr.Dataset()
+        return xr.Dataset(), []
     ## Add default dimension sg_data_point
-    dims_to_merge = ['sg_data_point']
+    dims_to_merge = ["sg_data_point"]
     # add the dimensions that match the instrument names to the list
-    dims, instruments = list(ds1_base.sizes), ds1_base.attrs.get("instrument", "").split()
+    dims, instruments = (
+        list(ds1_base.sizes),
+        ds1_base.attrs.get("instrument", "").split(),
+    )
     for instrument in instruments:
         if instrument + "_data_point" in dims:
             dims_to_merge.append(instrument + "_data_point")
         elif instrument == "sbe41" and "sbect_data_point" in dims:
             dims_to_merge.append("sbect_data_point")
-    ### add the dimensions of longitude and pressure, as they are possibly different
-    longitude_dim = list(ds1_base["longitude"].sizes)[0]
-    pressure_dim = list(ds1_base["pressure"].sizes)[0]
-    dims_to_merge += [longitude_dim, pressure_dim]
+    ### add the dimension of longitude, as this might be ctd_data_point and different from the instrument data point dimension
+    ### this the dimension that ctd relies on for pressure, depth, longitude, latitude, time
+    ctd_dim = list(ds1_base["longitude"].sizes)[0]
+    ### delete pressure and depth from dataset if pressure_dim not sg_data_point,
+    ### as then both ctd and navigation pressure exists and we only want to keep the ctd pressure, and depth is redundant with pressure
+    if ctd_dim != "sg_data_point":
+        ds1_base = ds1_base.drop_vars(["pressure", "depth"], errors="ignore")
+    dims_to_merge += [ctd_dim]
     # Remove duplicates
     dims_to_merge = list(set(dims_to_merge))
     # Split the dataset by unique dimensions
@@ -265,61 +274,12 @@ def process_dataset(ds1_base: xr.Dataset, firstrun: bool = False) -> tuple[
     # Must be after split_by_unique_dims and after rename_dimensions
     ds_gps = split_ds[("gps_info",)]
     ds_new = add_gps_info_to_dataset(ds_new, ds_gps)
-    # Add the profile number (odd for dives, even for ascents)
+    # Add the profile number (odd for dives, even for get_sgscents)
     ds_new = tools.assign_profile_number(ds_new, ds1_base)
     # Assign the phase of the dive (must be after adding divenum)
     ds_new = tools.assign_phase(ds_new)
     # Assign DEPTH_Z to the dataset where positive is up.
     ds_new = tools.calc_Z(ds_new)
-
-    # Add sensor information to the dataset - can be done on the concatenated data
-    # -----------------------------------------------------------------------------
-    #ds_sensor = tools.gather_sensor_info(ds_other, ds_sgcal, firstrun)
-    #ds_new = tools.add_sensor_to_dataset(ds_new, ds_sensor, ds_sgcal, firstrun)
-
-    # Now we check the TIME_GPS;
-    # Get dtype - if float, convert - test for unrealistic dates - error if unsupported type.
-
-    dtype = ds_new["TIME_GPS"].dtype
-
-    # Test 1: dtype is already datetime
-    if np.issubdtype(dtype, np.datetime64):
-        pass
-        #print("TIME_GPS is already datetime64")
-
-    # Case 2: numeric -> convert
-    elif np.issubdtype(dtype, np.number):
-
-        values = ds_new["TIME_GPS"].values.astype("float64")
-
-        # Check for NaN or inf
-        if not np.isfinite(values).all():
-            raise ValueError("TIME_GPS contains NaN or infinite values")
-
-        # Convert seconds since epoch -> datetime64[ns]
-        converted = (values * 1e9).astype("datetime64[ns]")
-
-        # Sanity check
-        min_date = converted.min()
-        max_date = converted.max()
-
-        # Define reasonable limits
-        lower_limit = np.datetime64("1990-01-01")
-        upper_limit = np.datetime64("2100-01-01")
-
-        if min_date < lower_limit or max_date > upper_limit:
-            raise ValueError(
-                f"TIME_GPS dates look unrealistic: "
-                f"{min_date} -> {max_date}"
-            )
-
-        ds_new["TIME_GPS"] = converted
-
-    # Case 3: unsupported dtype
-    else:
-        raise TypeError(
-            f"Unsupported TIME_GPS dtype: {dtype}"
-        )
 
     vars_to_remove = vocabularies.vars_to_remove
     vars_present_to_remove = [var for var in vars_to_remove if var in ds_new.variables]
@@ -333,6 +293,7 @@ def process_dataset(ds1_base: xr.Dataset, firstrun: bool = False) -> tuple[
 
     attr_warnings = ""
     return ds_new, attr_warnings
+
 
 def standardise_OG10(
     ds: xr.Dataset,
@@ -945,6 +906,7 @@ def process_and_save_data(
     -------
     xarray.Dataset
         The processed dataset.
+
     """
     # Load and concatenate all datasets from the server
     ds1_base = readers.load_first_basestation_file(input_location)
