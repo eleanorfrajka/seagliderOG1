@@ -10,13 +10,14 @@ import logging
 import re
 from collections.abc import Mapping
 from datetime import date
+from typing import NamedTuple
 
 import numpy as np
 import pandas as pd
 import xarray as xr
-from dateutil import parser
 
 from seagliderOG1 import vocabularies
+from seagliderOG1.mission import _is_iso_date
 
 _log = logging.getLogger(__name__)
 
@@ -406,6 +407,76 @@ def og1_name_mapping(
     return result, time_variables
 
 
+#: Key under which :func:`gather_sensor_info` keeps a sensor's calibration-comment parse
+#: record; :func:`add_sensor_to_dataset` writes it to the ``conversion_sensor_calibration``
+#: global and not as a sensor attribute.
+CALIBCOMM_RECORD_KEY = "_calibcomm"
+
+
+def _first_sample(datasets: list[xr.Dataset]) -> date | None:
+    """Return the date of the mission's first sample, or None when it cannot be read.
+
+    The earliest ``start_time`` global (unix seconds) across the dive files; a file without
+    it falls back to its earliest datetime64 ``time`` value.
+    """
+    starts = []
+    for dataset in datasets:
+        start = dataset.attrs.get("start_time")
+        if start is not None:
+            try:
+                starts.append(np.datetime64(int(float(start)), "s"))
+                continue
+            except (TypeError, ValueError):
+                pass
+        if "time" in dataset.variables and np.issubdtype(
+            dataset["time"].dtype, np.datetime64
+        ):
+            values = dataset["time"].values
+            if values.size and not np.all(np.isnat(values)):
+                starts.append(np.nanmin(values).astype("datetime64[s]"))
+    if not starts:
+        return None
+    return min(starts).astype("datetime64[D]").astype(date)
+
+
+def _check_calibration_date(sensor: str, metadata: dict, first_sample: date) -> None:
+    """Flag a calibration date after the first sample, or long before it.
+
+    The date is kept as written: the sensor's ``comment`` gains a sentence, a WARNING is
+    logged, and the check is added to the parse record for the report.
+    """
+    value = str(metadata.get("sensor_calibration_date", "UNK"))
+    try:
+        calibrated = date.fromisoformat(value)
+    except ValueError:
+        return
+    earliest = _window_start(first_sample)
+    if calibrated > first_sample:
+        check = (
+            f"calibration date {value} is after the first sample "
+            f"{first_sample.isoformat()}"
+        )
+    elif calibrated < earliest:
+        check = (
+            f"calibration date {value} is more than {CALIBRATION_WINDOW_YEARS} years "
+            f"before the first sample {first_sample.isoformat()}"
+        )
+    else:
+        return
+    sentence = f"{check[0].upper()}{check[1:]} (see original_calibcomm)."
+    existing = metadata.get("comment")
+    metadata["comment"] = f"{existing} {sentence}" if existing else sentence
+    record = metadata.get(CALIBCOMM_RECORD_KEY)
+    if record is not None:
+        record["checks"].append(check)
+    _log.warning(
+        "Sensor '%s': %s; kept as written. Correct it with sensors: in the mission "
+        "config if it is wrong.",
+        sensor,
+        check,
+    )
+
+
 def gather_sensor_info(
     list_of_datasets: list[xr.Dataset], overrides: Mapping | None = None
 ) -> dict:
@@ -416,10 +487,18 @@ def gather_sensor_info(
       - technical specs (from OG1_sensor_attributes.yaml vocabularies)
       - serial numbers + calibration dates (from calibcomm variables)
 
-    Checks calibration information across all datasets. Missing information
-    is reported once per sensor. Conflicting serial numbers or calibration
-    dates are reported, and the first nonempty value is retained.
-    Calibration variables not belonging to any listed sensor are reported.
+    Each sensor's calibration comments are read with :func:`parse_calibcomm`, using the
+    mission's first sample (the earliest ``start_time``) to settle two-digit years and
+    all-numeric dates. The first comment with text is kept: its serial and date become
+    ``sensor_serial_number`` and ``sensor_calibration_date`` (``"UNK"`` when not read),
+    the comment itself ``original_calibcomm``, and per-channel dates (RBR)
+    ``sensor_calibration_dates``. Comments that parse differently across dives are
+    reported. A sensor with no comment gets ``"UNK"`` for both fields. A calibration date
+    after the first sample, or more than :data:`CALIBRATION_WINDOW_YEARS` before it, is
+    kept and noted in the sensor's ``comment``; sensors sharing a serial number are
+    reported. Calibration variables not belonging to any listed sensor are reported.
+    Each sensor's parse record (source variable, rules, note, checks) is kept under
+    :data:`CALIBCOMM_RECORD_KEY`.
 
     The mission config can correct what the calibration comments say: ``overrides``
     maps a sensor key to ``serial_number`` / ``calibration_date`` values
@@ -527,6 +606,7 @@ def gather_sensor_info(
             "n/a",
         }
 
+    first_sample = _first_sample(datasets)
     matched_records = set()
     for sensor, metadata in sensor_dict.items():
         # --- Determine calibcomm variable names -------------------------------
@@ -544,8 +624,6 @@ def gather_sensor_info(
         elif metadata.get("sensor_maker") == "WET Labs":
             candidate_names.add("sg_cal_calibcomm_wetlabs")
 
-        observations = {"sensor_serial_number": [], "sensor_calibration_date": []}
-        found_calibration_text = False
         matching_records = sorted(
             (
                 entry
@@ -554,7 +632,8 @@ def gather_sensor_info(
             ),
             key=lambda entry: entry[0],
         )
-        # --- Extract serial number + calibration date --------------------------
+        # --- Parse every matching comment; the first one with text is kept ---------
+        parsed = []
         for record_index, (dataset_index, name, variable) in matching_records:
             matched_records.add(record_index)
             raw_value = variable.values.item()
@@ -562,50 +641,162 @@ def gather_sensor_info(
                 raw_value = raw_value.decode("utf-8", errors="replace")
             if is_missing(raw_value):
                 continue
-            found_calibration_text = True
-            serial_number, cal_info = extract_instrument_info(str(raw_value))
-            for field, value in (
-                ("sensor_serial_number", serial_number),
-                ("sensor_calibration_date", cal_info),
-            ):
-                if not is_missing(value):
-                    observations[field].append((value, dataset_index, name))
+            parsed.append(
+                (parse_calibcomm(str(raw_value), first_sample), dataset_index, name)
+            )
 
         # --- Check for changes across all matching calibcomms -------------------
-        missing_fields = []
-        for field, entries in observations.items():
-            distinct = {}
-            for value, dataset_index, name in entries:
-                distinct.setdefault(str(value), []).append((dataset_index, name))
+        for field, attr in (
+            ("serial", "sensor_serial_number"),
+            ("calibration_date", "sensor_calibration_date"),
+        ):
+            # UNK on one dive and a value on another is not a conflict: the value is
+            # taken from the later dive below.
+            distinct: dict[str, list] = {}
+            for info, dataset_index, name in parsed:
+                if getattr(info, field) != "UNK":
+                    distinct.setdefault(getattr(info, field), []).append(
+                        (dataset_index, name)
+                    )
             if len(distinct) > 1:
                 details = "; ".join(
                     f"{value!r} in {sources}" for value, sources in distinct.items()
                 )
                 _log.warning(
-                    "Conflicting %s for sensor '%s': %s", field, sensor, details
+                    "Conflicting %s for sensor '%s': %s", attr, sensor, details
                 )
-            if entries:
-                metadata[field] = entries[0][0]
-            else:
-                missing_fields.append(field)
 
-        if missing_fields:
-            # Preserve the existing helper's missing-value defaults.
-            default_serial, default_calibration = extract_instrument_info(None)
-            defaults = {
-                "sensor_serial_number": default_serial,
-                "sensor_calibration_date": default_calibration,
+        if parsed:
+            info, dataset_index, name = parsed[0]
+            metadata["sensor_serial_number"] = info.serial
+            metadata["sensor_calibration_date"] = info.calibration_date
+            if info.dates:
+                metadata["sensor_calibration_dates"] = "; ".join(
+                    f"{channel}: {iso}" for channel, iso in info.dates.items()
+                )
+            metadata["original_calibcomm"] = info.original
+            metadata[CALIBCOMM_RECORD_KEY] = {
+                "sensor_key": sensor,
+                "source_variable": name,
+                "source_file_index": dataset_index,
+                "serial_rule": info.serial_rule,
+                "date_rule": info.date_rule,
+                "note": info.note,
+                "checks": [],
+                # The parameters that chose between date readings, so the choice can be
+                # reconstructed from the file.
+                "window_years": CALIBRATION_WINDOW_YEARS,
+                "first_sample": first_sample.isoformat() if first_sample else None,
             }
-            for field in missing_fields:
-                metadata[field] = defaults[field]
-            reason = (
-                "No calibration info found"
-                if not found_calibration_text
-                else f"Incomplete calibration info (missing {', '.join(missing_fields)})"
-            )
+            if info.note.startswith("both readings fit"):
+                record = metadata[CALIBCOMM_RECORD_KEY]
+                record["checks"].append(f"date chosen by convention: {info.note}")
+                _log.warning(
+                    "Sensor '%s': calibration date in %r has two readings; %s. Check it "
+                    "and correct it with sensors: in the mission config if wrong.",
+                    sensor,
+                    info.original,
+                    info.note,
+                )
+            # A field the first comment leaves UNK is taken from the first later dive
+            # whose comment gives it and does not contradict what is already read (a
+            # different serial, or a different date); the sensor comment and the record
+            # say where it came from.
+            record = metadata[CALIBCOMM_RECORD_KEY]
+            fills = []
+            for field, attr, rule_key, other_field, other_attr in (
+                (
+                    "serial",
+                    "sensor_serial_number",
+                    "serial_rule",
+                    "calibration_date",
+                    "sensor_calibration_date",
+                ),
+                (
+                    "calibration_date",
+                    "sensor_calibration_date",
+                    "date_rule",
+                    "serial",
+                    "sensor_serial_number",
+                ),
+            ):
+                if metadata[attr] != "UNK":
+                    continue
+                known = metadata[other_attr]
+                later = next(
+                    (
+                        entry
+                        for entry in parsed[1:]
+                        if getattr(entry[0], field) != "UNK"
+                        and (
+                            known == "UNK"
+                            or getattr(entry[0], other_field) in ("UNK", known)
+                        )
+                    ),
+                    None,
+                )
+                if later is None:
+                    continue
+                other, other_index, other_name = later
+                metadata[attr] = getattr(other, field)
+                if field == "calibration_date" and other.dates:
+                    metadata["sensor_calibration_dates"] = "; ".join(
+                        f"{channel}: {iso}" for channel, iso in other.dates.items()
+                    )
+                record[rule_key] = getattr(other, rule_key)
+                record.setdefault("filled_from", {})[attr] = {
+                    "source_variable": other_name,
+                    "source_file_index": other_index,
+                    "original": other.original,
+                }
+                sentence = (
+                    f"{attr} {getattr(other, field)} read from the comment in input "
+                    f"file {other_index} ({other_name}: {other.original!r}); the first "
+                    "comment does not give it."
+                )
+                existing = metadata.get("comment")
+                metadata["comment"] = f"{existing} {sentence}" if existing else sentence
+                fills.append(
+                    f"{attr} from input file {other_index}: {other.original!r}"
+                )
+            if fills:
+                record["note"] = "; ".join(
+                    ([f"first comment: {info.note}"] if info.note else []) + fills
+                )
+            unknown = [
+                label
+                for label, value in (
+                    ("serial", metadata["sensor_serial_number"]),
+                    ("calibration date", metadata["sensor_calibration_date"]),
+                )
+                if value == "UNK"
+            ]
+            if unknown:
+                _log.warning(
+                    "Sensor '%s': %s UNK from %s %r (serial rule %s, date rule %s)%s.",
+                    sensor,
+                    " and ".join(unknown),
+                    name,
+                    info.original,
+                    info.serial_rule,
+                    info.date_rule,
+                    f": {info.note}" if info.note else "",
+                )
+        else:
+            metadata["sensor_serial_number"] = "UNK"
+            metadata["sensor_calibration_date"] = "UNK"
+            metadata[CALIBCOMM_RECORD_KEY] = {
+                "sensor_key": sensor,
+                "source_variable": "",
+                "source_file_index": None,
+                "serial_rule": "none",
+                "date_rule": "none",
+                "note": "no calibration comment for this sensor",
+                "checks": [],
+            }
             _log.warning(
-                "%s for sensor '%s'. Available calibration variables: %s",
-                reason,
+                "No calibration info found for sensor '%s'. Available calibration "
+                "variables: %s",
                 sensor,
                 available_calibcomm,
             )
@@ -629,8 +820,17 @@ def gather_sensor_info(
                 )
                 raise ValueError(msg)
             attr = vocabularies.SENSOR_OVERRIDE_FIELDS[field]
+            if field == "calibration_date" and not _is_iso_date(str(value)):
+                msg = (
+                    f"sensors.{sensor}.calibration_date {value!r} is not an ISO date "
+                    "(YYYY-MM-DD)."
+                )
+                raise ValueError(msg)
             previous = metadata.get(attr)
             metadata[attr] = str(value)
+            record = metadata.get(CALIBCOMM_RECORD_KEY)
+            if record is not None:
+                record.setdefault("overridden", []).append(attr)
             if str(previous) != str(value):
                 notes.append(
                     f"{attr} {value} from the mission config "
@@ -643,6 +843,31 @@ def gather_sensor_info(
             _log.info(
                 "Sensor '%s' corrected from the mission config: %s", sensor, notes
             )
+
+    # --- Dive-date check and shared serials (after the config corrections) ---------
+    if first_sample is not None:
+        for sensor, metadata in sensor_dict.items():
+            _check_calibration_date(sensor, metadata, first_sample)
+    by_serial: dict[str, list[str]] = {}
+    for sensor, metadata in sensor_dict.items():
+        serial = str(metadata.get("sensor_serial_number", "UNK"))
+        if "sensor_type" in metadata and serial != "UNK":
+            by_serial.setdefault(serial, []).append(sensor)
+    for serial, sharing in by_serial.items():
+        if len(sharing) < 2:
+            continue
+        _log.warning(
+            "Sensors %s share serial number %s; a calibration comment may have been "
+            "copied from another instrument. Correct it with sensors: in the mission "
+            "config.",
+            sharing,
+            serial,
+        )
+        for sensor in sharing:
+            record = sensor_dict[sensor].get(CALIBCOMM_RECORD_KEY)
+            if record is not None:
+                others = ", ".join(other for other in sharing if other != sensor)
+                record["checks"].append(f"serial {serial} shared with {others}")
 
     # --- Report calibcomms that do not belong to any listed sensor --------------
     unmatched = {}
@@ -658,6 +883,47 @@ def gather_sensor_info(
         )
 
     return sensor_dict
+
+
+def _sensor_variable_names(sensor_dict: dict) -> dict[str, str]:
+    """Return each catalogued sensor key's ``SENSOR_<TYPE>_<SERIAL>`` variable name.
+
+    Two sensors that would get the same name (same type, same serial, including two
+    ``UNK`` serials) are not merged: the second and later get the sensor key appended
+    (``SENSOR_FLUOROMETER_UNK_wlbb2fl``) and a WARNING names them.
+
+    Parameters
+    ----------
+    sensor_dict : dict
+        Sensor key to metadata, from :func:`gather_sensor_info`.
+
+    Returns
+    -------
+    dict of str to str
+        Sensor key to variable name, for keys with a ``sensor_type``.
+
+    """
+    names: dict[str, str] = {}
+    taken: dict[str, str] = {}
+    for sensor, info in sensor_dict.items():
+        if "sensor_type" not in info:
+            continue
+        sensor_type = info["sensor_type"].upper().replace(" ", "_")
+        name = f"SENSOR_{sensor_type}_{info['sensor_serial_number']}"
+        if name in taken:
+            unique = f"{name}_{sensor}"
+            _log.warning(
+                "Sensors '%s' and '%s' would both be %s; the second is written as %s. "
+                "Give them serial numbers with sensors: in the mission config.",
+                taken[name],
+                sensor,
+                name,
+                unique,
+            )
+            name = unique
+        taken[name] = sensor
+        names[sensor] = name
+    return names
 
 
 def add_sensor_to_dataset(
@@ -687,20 +953,23 @@ def add_sensor_to_dataset(
           SENSOR_<SENSOR_TYPE>_<SERIAL>
     - Attributes for each sensor variable are added from sensor_dict.
     - `sensor_info["variables"]` is handled later (point 3).
+    - Each sensor's calibration-comment parse record is written to the
+      ``conversion_sensor_calibration`` global: a JSON object of sensor variable name to
+      ``{sensor_key, source_variable, source_file_index, serial_rule, date_rule, note,
+      checks[, overridden]}``.
 
     """
     # -------------------------------------------------------------------------
     # 1. Create dimensionless sensor variables in the dataset
     # -------------------------------------------------------------------------
-    for _, sensor_info in sensor_dict.items():
+    calibration_records = {}
+    variable_names = _sensor_variable_names(sensor_dict)
+    for sensor, sensor_info in sensor_dict.items():
         # A sensor key with no catalogue entry has no type to name a variable by
         # (gather_sensor_info warned about it); skip it rather than fail the run.
-        if "sensor_type" not in sensor_info:
+        if sensor not in variable_names:
             continue
-        # Build sensor variable name
-        sensor_type = sensor_info["sensor_type"].upper().replace(" ", "_")
-        serial = sensor_info["sensor_serial_number"]
-        sensor_var_name = f"SENSOR_{sensor_type}_{serial}"
+        sensor_var_name = variable_names[sensor]
 
         # Create the variable (dimensionless DataArray)
         _log.debug(
@@ -713,9 +982,16 @@ def add_sensor_to_dataset(
         # 2. Add sensor attributes (except 'variables')
         # ---------------------------------------------------------------------
         for attr, value in sensor_info.items():
-            if attr == "variables":
+            if attr == "variables" or attr.startswith("_"):
                 continue
             ds_og1[sensor_var_name].attrs[attr] = value
+        if CALIBCOMM_RECORD_KEY in sensor_info:
+            calibration_records[sensor_var_name] = sensor_info[CALIBCOMM_RECORD_KEY]
+    # Always written (an empty object when the mission has no sensors), so an absent
+    # global means a file from before the record existed.
+    ds_og1.attrs["conversion_sensor_calibration"] = json.dumps(
+        {name: calibration_records[name] for name in sorted(calibration_records)}
+    )
 
     # -------------------------------------------------------------------------
     # 3. Assign 'sensor' attribute to sensor-specific variables
@@ -742,9 +1018,7 @@ def add_sensor_to_dataset(
             continue
 
         og1_name = str(og1_name)
-        sensor_type = sensor_dict[instrument]["sensor_type"].upper().replace(" ", "_")
-        serial = sensor_dict[instrument]["sensor_serial_number"]
-        ds_og1[og1_name].attrs["sensor"] = f"SENSOR_{sensor_type}_{serial}"
+        ds_og1[og1_name].attrs["sensor"] = variable_names[instrument]
 
     return ds_og1
 
@@ -1494,134 +1768,363 @@ def add_scalar_parameters(
     return result, mapping
 
 
-def parse_8_digit_date(date_str: str) -> str | None:
-    """Validate and format 8-digit date strings.
+class CalibInfo(NamedTuple):
+    """What :func:`parse_calibcomm` read from one calibration comment.
 
-    Prioritize YYYY-MM-DD, then DD-MM-YYYY based on realistic ranges.
-
-    Parameters
+    Attributes
     ----------
-    date_str : str
-        The string from which to extract eight digits forming a date.
+    serial : str
+        The serial number as an identifier (letters and dashes kept), or ``"UNK"``.
+    calibration_date : str
+        ISO ``YYYY-MM-DD``, or ``"UNK"``. For a string with per-channel dates, the latest.
+    dates : dict of str to str
+        Per-channel ISO dates in the order the string gives them (RBR strings); empty
+        otherwise.
+    serial_rule : str
+        Name of the serial rule that matched (see :data:`CALIBCOMM_SERIAL_RULES`).
+    date_rule : str
+        Name of the date rule that matched, ``"none"`` when no date was read.
+    note : str
+        What was decided or not understood (an ambiguous reading, a swapped day and
+        month, a reading ruled out by the first sample); empty when nothing needs saying.
+    original : str
+        The comment exactly as read, trailing NULs and whitespace stripped.
 
-    Returns
-    -------
-    str or None
-        The formatted ``YYYY-MM-DD`` date, ``"Format Error"`` when no valid
-        date is found, or ``None`` when the string lacks eight digits.
     """
-    # Extract only the digits
-    d = "".join(re.findall(r"\d", date_str))
-    if len(d) != 8:
+
+    serial: str
+    calibration_date: str
+    dates: dict[str, str]
+    serial_rule: str
+    date_rule: str
+    note: str
+    original: str
+
+
+#: Serial rules in the order they are tried, name to what the rule reads. The names appear
+#: in the conversion report and the calibration-comments docs page.
+CALIBCOMM_SERIAL_RULES = {
+    "label": "the token after s/n, S/N, sn, SN:, SN (glued), serial, serial #, serialnum:",
+    "SBE#-tc": "SBE#<serial>t<n>/c<n>: the CT serial; the T/C sensor pair is not part of it",
+    "tc-only": "SBE t<n>/c<n>: a T/C sensor pair and no CT serial (UNK)",
+    "SBE-token": "the token after SBE when there is no label",
+    "bare-token": "the whole comment is one token (it may be a model number)",
+    "none": "no serial in the comment (UNK)",
+}
+
+_SERIAL_LABEL = re.compile(
+    r"(?i)\b(?:serialnum|serial\s*#|serial|s/n|sn)\s*[:#-]?\s*"
+    r"((?!\d{4}[-/.]\d{1,2}[-/.]\d{1,2}\b)(?=[\w-]*\d)\w[\w-]*)"
+)
+_SERIAL_SBE_TC = re.compile(r"(?i)\bSBE\s*#\s*(\d+)\s*t\d+/c\d+")
+_SERIAL_TC_ONLY = re.compile(r"(?i)\bSBE\s+t\d+/c\d+\b")
+_SERIAL_SBE_TOKEN = re.compile(r"(?i)\bSBE\s+((?=[\w-]*\d)\w[\w-]*)")
+_BARE_TOKEN = re.compile(r"(?=[\w-]*\d)[\w-]+")
+
+_MONTHS = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+    "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+}  # fmt: skip
+_MONTH_WORD = (
+    r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?"
+    r"|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?"
+)
+_DATE_KEYWORD = re.compile(r"(?i)\bcal(?:ibration|ibrated)?\b\s*:?\s*")
+_DATE_RBR = re.compile(r"(\w+):(\d{4}-\d{2}-\d{2})T[\d:.]+Z")
+_DATE_WORD_MONTH = re.compile(
+    rf"(?i)\b(\d{{1,2}})([\s-]*)({_MONTH_WORD})(?![a-z])([\s-]*)(\d{{4}}|\d{{2}})\b"
+)
+_DATE_YEAR_FIRST = re.compile(r"\b(\d{4})([-/.])(\d{1,2})\2(\d{1,2})\b")
+_DATE_MONTH_WORD_FIRST = re.compile(
+    rf"(?i)\b({_MONTH_WORD})(?![a-z])\.?\s+(\d{{1,2}}),?\s+(\d{{4}}|\d{{2}})\b"
+)
+# What may stand between the calibration keyword and the date: whitespace, punctuation,
+# "on" / "date" / "dated", and a serial label with its number (removed first). The date
+# must come next; a date later in the comment (a "recal due" date, a revision number) is
+# not read.
+_DATE_LEAD = re.compile(
+    r"(?i)^(?:\s+|[:,;#]|\b(?:on|dated?)\b|(?:serialnum|serial|s/n|sn)\b)*"
+)
+_DATE_NUMERIC = re.compile(r"\b(\d{1,2})([/.-])(\d{1,2})\2(\d{4}|\d{2})\b")
+#: Which reading of a two-number date wins when both fit, by separator: the US habit for
+#: slashes, the European one for dots and dashes.
+_NUMERIC_PREFERENCE = {"/": "month", ".": "day", "-": "day"}
+_DATE_8 = re.compile(r"\b(\d{8})\b")
+_DATE_6 = re.compile(r"\b(\d{6})\b")
+
+#: How many years before the first sample a calibration date may lie and still be taken
+#: as the reading of an all-numeric date (and before which a date is flagged).
+CALIBRATION_WINDOW_YEARS = 30
+
+
+def _calibcomm_serial(text: str) -> tuple[str, str]:
+    """Return ``(serial, rule)`` for a calibration comment by the serial rules, in order."""
+    if match := _SERIAL_LABEL.search(text):
+        return match.group(1), "label"
+    if match := _SERIAL_SBE_TC.search(text):
+        return match.group(1), "SBE#-tc"
+    if _SERIAL_TC_ONLY.search(text):
+        return "UNK", "tc-only"
+    if match := _SERIAL_SBE_TOKEN.search(text):
+        return match.group(1), "SBE-token"
+    if _BARE_TOKEN.fullmatch(text.strip()):
+        return text.strip(), "bare-token"
+    return "UNK", "none"
+
+
+def _make_date(year: int, month: int, day: int) -> date | None:
+    """Return the date, or None when the numbers are not a calendar date."""
+    try:
+        return date(year, month, day)
+    except ValueError:
         return None
 
-    # Try YYYYMMDD (Standard ISO-like)
-    # Year: 1900-2099, Month: 01-12, Day: 01-31
-    y, m, day = int(d[:4]), int(d[4:6]), int(d[6:])
-    if 1900 <= y < date.today().year and 1 <= m <= 12 and 1 <= day <= 31:
-        return f"{y:04d}-{m:02d}-{day:02d}"
 
-    # Try DDMMYYYY (European style)
-    # Day: 01-31, Month: 01-12, Year: 1900-2099
-    day, m, y = int(d[:2]), int(d[2:4]), int(d[4:])
-    if 1900 <= y < date.today().year and 1 <= m <= 12 and 1 <= day <= 31:
-        return f"{y:04d}-{m:02d}-{day:02d}"
+def _full_year(year: int, digits: int, first_sample: date | None) -> int:
+    """Return a four-digit year; a two-digit year takes the latest century not after the first sample.
 
-    # Try MMDDYYYY (US style)
-    m, day, y = int(d[:2]), int(d[2:4]), int(d[4:])
-    if 1900 <= y < date.today().year and 1 <= m <= 12 and 1 <= day <= 31:
-        return f"{y:04d}-{m:02d}-{day:02d}"
-
-    return "Format Error"
+    Without a first sample, two-digit years 00-69 are 20xx and 70-99 are 19xx.
+    """
+    if digits == 4:
+        return year
+    if first_sample is None:
+        return 2000 + year if year < 70 else 1900 + year
+    # The latest century that does not put the year after the first sample's year.
+    candidates = [c + year for c in (1900, 2000, 2100) if c + year <= first_sample.year]
+    return max(candidates) if candidates else 2000 + year
 
 
-def extract_instrument_info(input_string: str | None) -> tuple[str, str]:
-    """Extract a serial number and calibration date from a calibration string.
+def _window_start(first_sample: date) -> date:
+    """Return the date :data:`CALIBRATION_WINDOW_YEARS` before the first sample.
+
+    A first sample on 29 February maps to 28 February of the earlier year.
+    """
+    year = first_sample.year - CALIBRATION_WINDOW_YEARS
+    try:
+        return first_sample.replace(year=year)
+    except ValueError:
+        return first_sample.replace(year=year, day=28)
+
+
+def _in_window(day: date, first_sample: date) -> bool:
+    """Return True when ``day`` is on or before the first sample and within the window."""
+    return _window_start(first_sample) <= day <= first_sample
+
+
+def _choose_reading(
+    readings: list[tuple[str, date | None]],
+    first_sample: date | None,
+    prefer: str | None = None,
+) -> tuple[str, str, str]:
+    """Pick one reading of an all-numeric date; return ``(iso_or_UNK, rule, note)``.
+
+    ``readings`` lists ``(rule, date)`` for each reading the shape allows, ``None`` for a
+    reading that is not a calendar date. The readings inside the window (on or before the
+    first sample, not more than :data:`CALIBRATION_WINDOW_YEARS` before it) decide: one →
+    that reading; several → ``prefer`` when given, else UNK. With none inside the window,
+    a single valid reading is kept (the dive-date check then flags it); several → ``prefer``
+    or UNK.
+    """
+    valid = [(rule, day) for rule, day in readings if day is not None]
+    shape = " or ".join(rule for rule, _ in readings)
+    if not valid:
+        return "UNK", shape, f"no reading of {shape} is a calendar date"
+    candidates = valid
+    if first_sample is not None:
+        inside = [(rule, day) for rule, day in valid if _in_window(day, first_sample)]
+        if inside:
+            candidates = inside
+    if len(candidates) == 1:
+        rule, day = candidates[0]
+        notes = []
+        for other_rule, other_day in readings:
+            if other_rule == rule:
+                continue
+            if other_day is None:
+                notes.append(f"{other_rule} reading is not a calendar date")
+            else:
+                notes.append(
+                    f"{other_rule} reading {other_day.isoformat()} is outside the window "
+                    f"(on or before the first sample {first_sample.isoformat()}, "
+                    f"at most {CALIBRATION_WINDOW_YEARS} years earlier)"
+                )
+        return day.isoformat(), rule, "; ".join(notes)
+    if prefer is not None:
+        for rule, day in candidates:
+            if rule == prefer:
+                listed = ", ".join(f"{r} {d.isoformat()}" for r, d in candidates)
+                return (
+                    day.isoformat(),
+                    rule,
+                    f"both readings fit ({listed}); read {prefer}",
+                )
+    listed = ", ".join(f"{rule} {day.isoformat()}" for rule, day in candidates)
+    return "UNK", shape, f"ambiguous: {listed}"
+
+
+def _single_date(
+    match: re.Match, rule: str, year: int, month: int, day: int
+) -> tuple[str, dict[str, str], str, str]:
+    """Return the ``_calibcomm_date`` result for a date shape with one reading."""
+    value = _make_date(year, month, day)
+    if value is None:
+        return "UNK", {}, rule, f"{match.group(0)!r} is not a calendar date"
+    return value.isoformat(), {}, rule, ""
+
+
+def _calibcomm_date(
+    text: str, first_sample: date | None
+) -> tuple[str, dict[str, str], str, str]:
+    """Return ``(calibration_date, dates, rule, note)`` for a calibration comment."""
+    if channels := _DATE_RBR.findall(text):
+        dates: dict[str, str] = {}
+        repeated = []
+        for channel, iso in channels:
+            if channel in dates and dates[channel] != iso:
+                repeated.append(f"{channel} {dates[channel]}")
+            dates[channel] = max(dates.get(channel, iso), iso)
+        note = (
+            f"channel given twice; the latest date kept (dropped: {', '.join(repeated)})"
+            if repeated
+            else ""
+        )
+        return max(dates.values()), dates, "rbr-iso", note
+    keyword = _DATE_KEYWORD.search(text)
+    if keyword is None:
+        return (
+            "UNK",
+            {},
+            "none",
+            "no calibration keyword (cal, calibration, calibrated)",
+        )
+    tail = _SERIAL_LABEL.sub(" ", text[keyword.end() :])
+    tail = tail[_DATE_LEAD.match(tail).end() :]
+    if match := _DATE_YEAR_FIRST.match(tail):
+        year_s, sep, month_s, day_s = match.groups()
+        return _single_date(
+            match, f"yyyy{sep}mm{sep}dd", int(year_s), int(month_s), int(day_s)
+        )
+    if match := _DATE_WORD_MONTH.match(tail):
+        day_s, sep1, month_s, sep2, year_s = match.groups()
+        separators = sep1 + sep2
+        sep = "-" if "-" in separators else (" " if separators else "")
+        return _single_date(
+            match,
+            f"dd{sep}Mon{sep}{'yyyy' if len(year_s) == 4 else 'yy'}",
+            _full_year(int(year_s), len(year_s), first_sample),
+            _MONTHS[month_s[:3].lower()],
+            int(day_s),
+        )
+    if match := _DATE_MONTH_WORD_FIRST.match(tail):
+        month_s, day_s, year_s = match.groups()
+        return _single_date(
+            match,
+            f"Mon dd, {'yyyy' if len(year_s) == 4 else 'yy'}",
+            _full_year(int(year_s), len(year_s), first_sample),
+            _MONTHS[month_s[:3].lower()],
+            int(day_s),
+        )
+    if match := _DATE_NUMERIC.match(tail):
+        first, sep, second, year_s = match.groups()
+        year = _full_year(int(year_s), len(year_s), first_sample)
+        month_rule, day_rule = f"mm{sep}dd{sep}yy", f"dd{sep}mm{sep}yy"
+        month_first = _make_date(year, int(first), int(second))
+        day_first = _make_date(year, int(second), int(first))
+        preferred = _NUMERIC_PREFERENCE[sep]
+        if preferred == "month" and month_first is None and day_first is not None:
+            return (
+                day_first.isoformat(),
+                {},
+                day_rule,
+                "month-first impossible; read day-first",
+            )
+        if preferred == "day" and day_first is None and month_first is not None:
+            return (
+                month_first.isoformat(),
+                {},
+                month_rule,
+                "day-first impossible; read month-first",
+            )
+        iso, rule, note = _choose_reading(
+            [(month_rule, month_first), (day_rule, day_first)],
+            first_sample,
+            prefer=month_rule if preferred == "month" else day_rule,
+        )
+        return iso, {}, rule, note
+    if match := _DATE_8.match(tail):
+        d = match.group(1)
+        iso, rule, note = _choose_reading(
+            [
+                ("yyyymmdd", _make_date(int(d[:4]), int(d[4:6]), int(d[6:]))),
+                ("ddmmyyyy", _make_date(int(d[4:]), int(d[2:4]), int(d[:2]))),
+            ],
+            first_sample,
+        )
+        return iso, {}, rule, note
+    if match := _DATE_6.match(tail):
+        d = match.group(1)
+        iso, rule, note = _choose_reading(
+            [
+                (
+                    "ddmmyy",
+                    _make_date(
+                        _full_year(int(d[4:]), 2, first_sample), int(d[2:4]), int(d[:2])
+                    ),
+                ),
+                (
+                    "yymmdd",
+                    _make_date(
+                        _full_year(int(d[:2]), 2, first_sample), int(d[2:4]), int(d[4:])
+                    ),
+                ),
+            ],
+            first_sample,
+        )
+        return iso, {}, rule, note
+    return (
+        "UNK",
+        {},
+        "none",
+        f"no date directly after the calibration keyword ({tail.strip()!r})",
+    )
+
+
+def parse_calibcomm(text: str | None, first_sample: date | None = None) -> CalibInfo:
+    """Read the serial number and calibration date from one calibration comment.
+
+    Calibration comments (``sg_cal_calibcomm*``, from ``sg_calib_constants.m``) are typed
+    by the operator, so the parser names the rule it used for each field and never guesses
+    between readings without a reason: an all-numeric date is read only where one reading
+    falls inside the window ending at the first sample (when both do, ``n/n/yy`` reads
+    month-first and ``n.n.yy`` / ``n-n-yy`` day-first); otherwise the field is ``"UNK"``
+    with a note.
 
     Parameters
     ----------
-    input_string : str or None
-        The raw ``calibcomm`` text. ``None`` or empty input yields the
-        missing-value defaults.
+    text : str or None
+        The comment as read from the basestation file. None or blank yields ``"UNK"``
+        for both fields.
+    first_sample : datetime.date or None, optional
+        Date of the mission's first sample. Resolves two-digit-year centuries and decides
+        between readings of an all-numeric date. Default is None.
 
     Returns
     -------
-    serial_number : str
-        Digits-only serial number, or ``"0000"`` when none is found.
-    cal_info : str
-        Formatted calibration date, or a status string such as ``"None Found"``
-        or ``"Format Error"`` when no valid date is parsed.
+    CalibInfo
+        Serial, calibration date, per-channel dates, the rule names, a note, and the
+        comment as read.
+
     """
-    if (
-        input_string is None
-        or not isinstance(input_string, str)
-        or input_string.strip() == ""
-    ):
-        return "0000", "00-00-0000"
-
-    s = input_string.replace(",", " ").replace(";", " ")
-
-    # 1. EXTRACT SERIAL NUMBER (DIGITS ONLY)
-    sn_patterns = [
-        r"(?i)(?:s/n|sn|serial\s*#|serialnum)[:\s]*([\w-]+)",
-        r"(?i)SBE\s+([\d-]+)",
-        r"(?i)SN([\d-]+)",
-    ]
-
-    raw_sn = ""
-    for pattern in sn_patterns:
-        match = re.search(pattern, s)
-        if match:
-            raw_sn = match.group(1)
-            break
-
-    # Strip letters and dashes, keeping only the numbers
-    serial_number = "".join(re.findall(r"\d+", raw_sn)) if raw_sn else "0000"
-
-    # 2. EXTRACT CALIBRATION DATES
-    multi_match = re.findall(r"(\w+):(\d{4}-\d{2}-\d{2}T[\d:]+Z)", s)
-
-    if multi_match:
-        cal_info = ", ".join(
-            [f"{m[0]}: {parser.parse(m[1]).strftime('%Y-%m-%d')}" for m in multi_match]
-        )
-    else:
-        parts = re.split(r"(?i)cal(?:ibration)?[:\s]*", s)
-        if len(parts) > 1:
-            date_candidate = parts[1].strip()
-
-            # Handle the specific 8-digit date requirement (29082012 -> 2908-20-12)
-            digit_only_date = "".join(re.findall(r"\d", date_candidate))
-            if len(digit_only_date) == 8 and "?" not in date_candidate:
-                cal_info = parse_8_digit_date(date_candidate)
-            elif "?" in date_candidate:
-                cal_info = "0000-00-00"
-            else:
-                try:
-                    dt = parser.parse(date_candidate, fuzzy=True, dayfirst=True)
-                    cal_info = dt.strftime("%Y-%m-%d")
-                except (ValueError, OverflowError):  # dateutil parse failure
-                    cal_info = "Format Error"
-        else:
-            cal_info = "None Found"
-
-    ## if cal_info has unrealistic year, month or day, rearrange so that year is first, then try parsing again
-    if cal_info not in ["None Found", "Format Error", "0000-00-00"]:
-        try:
-            dt = parser.parse(cal_info, fuzzy=True, dayfirst=True)
-            if (
-                dt.year < 1900
-                or dt.year > date.today().year
-                or dt.month > 12
-                or dt.day > 31
-            ):
-                # Try parsing with year first
-                dt = parser.parse(cal_info, fuzzy=True, yearfirst=True)
-                cal_info = dt.strftime("%Y-%m-%d")
-        except (ValueError, OverflowError):  # dateutil parse failure
-            pass
-
-    return serial_number, cal_info
+    original = (text or "").rstrip("\x00").strip()
+    if not original:
+        return CalibInfo("UNK", "UNK", {}, "none", "none", "empty comment", "")
+    serial, serial_rule = _calibcomm_serial(original)
+    calibration_date, dates, date_rule, note = _calibcomm_date(original, first_sample)
+    if serial_rule == "bare-token" and date_rule == "none":
+        note = "one token and no date; the token is taken as the serial"
+    return CalibInfo(
+        serial, calibration_date, dates, serial_rule, date_rule, note, original
+    )
 
 
 def _validate_coords(ds1: xr.Dataset) -> xr.Dataset:

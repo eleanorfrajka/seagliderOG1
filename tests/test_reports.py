@@ -685,7 +685,7 @@ def test_config_suggestions_fill_gaps_from_the_file(sg005_og1):
 
 
 def test_sensor_rows_list_each_sensor_its_users_and_placeholders(sg005_og1):
-    """demo_sg005: three sensors, each with its users; the zero serial/date is amber."""
+    """demo_sg005: three sensors, each with its users; the UNK serial/date is amber."""
     import xarray as xr
 
     with xr.open_dataset(sg005_og1, engine="netcdf4") as ds:
@@ -693,24 +693,25 @@ def test_sensor_rows_list_each_sensor_its_users_and_placeholders(sg005_og1):
         ledger = _record.conversion_ledger(ds)
         named, _carried = conversion._og1_tiers(ds, ledger, {})
     assert sorted(rows) == [
-        "SENSOR_CTD_245201",
-        "SENSOR_FLUOROMETER_0000",
+        "SENSOR_CTD_24520-1",
+        "SENSOR_FLUOROMETER_UNK",
         "SENSOR_OXYGEN_005",
     ]
-    ctd = rows["SENSOR_CTD_245201"]
+    ctd = rows["SENSOR_CTD_24520-1"]
     assert (ctd["type"], ctd["serial"], ctd["calibration"]) == (
         "CTD",
-        "245201",
+        "24520-1",
         "2008-02-04",
     )
     assert "TEMP" in ctd["used_by"].split(", ") and not ctd["bad"]
-    fluorometer = rows["SENSOR_FLUOROMETER_0000"]
-    assert fluorometer["calibration"] == "00-00-0000" and fluorometer["bad"]
+    fluorometer = rows["SENSOR_FLUOROMETER_UNK"]
+    assert fluorometer["calibration"] == "UNK" and fluorometer["bad"]
     # The sensors are not repeated in the Named by OG1 table.
     assert not [r for r in named if r["name"].startswith("SENSOR_")]
     assert conversion._is_placeholder("") and not conversion._is_placeholder(
         "2008-02-04"
     )
+    assert conversion._is_placeholder("UNK") and conversion._is_placeholder("0000")
 
 
 def test_config_suggestions_offer_registry_entries_for_an_unmatched_name():
@@ -923,3 +924,92 @@ def test_presence_strips_place_the_colorbar_beside_the_strips():
             conversion.draw_presence_strips, patterns, dives, source="test"
         )
     assert png is not None
+
+
+def test_calibration_comment_rows_pair_the_comment_with_the_sensor(sg005_og1):
+    """demo_sg005: each comment beside its SENSOR_ variable; the uncommented one is amber."""
+    import xarray as xr
+
+    with xr.open_dataset(sg005_og1, engine="netcdf4") as ds:
+        rows = {r["name"]: r for r in conversion._calibration_comment_rows(ds)}
+    ctd = rows["SENSOR_CTD_24520-1"]
+    assert (ctd["source_variable"], ctd["original"]) == (
+        "sg_cal_calibcomm",
+        "SBE 24520-1 calibration 04FEB08",
+    )
+    assert (ctd["serial"], ctd["calibration"], ctd["rules"]) == (
+        "24520-1",
+        "2008-02-04",
+        "SBE-token / ddMonyy",
+    )
+    assert not ctd["bad"]
+    oxygen = rows["SENSOR_OXYGEN_005"]
+    assert oxygen["source_variable"] == "sg_cal_calibcomm_oxygen" and not oxygen["bad"]
+    fluorometer = rows["SENSOR_FLUOROMETER_UNK"]
+    assert (fluorometer["source_variable"], fluorometer["original"]) == ("—", "—")
+    assert fluorometer["note"] == "no calibration comment for this sensor"
+    assert fluorometer["bad"]
+    html = conversion.render_conversion(sg005_og1)
+    assert "Calibration comments: basestation" in html
+    assert "SBE 24520-1 calibration 04FEB08" in html
+
+
+def test_calibration_comment_rows_absent_for_older_files(sg005_og1_copy):
+    """A file without conversion_sensor_calibration (0.2.0 and earlier) has no rows."""
+    import xarray as xr
+
+    with xr.open_dataset(sg005_og1_copy, engine="netcdf4") as ds:
+        ds = ds.load()
+    del ds.attrs["conversion_sensor_calibration"]
+    assert conversion._calibration_comment_rows(ds) is None
+
+
+def test_calibration_columns_drop_empty_channel_and_note(sg005_og1):
+    """sg005 has no channel dates (dropped) and one note (kept); widths still sum to ~100."""
+    import xarray as xr
+
+    with xr.open_dataset(sg005_og1, engine="netcdf4") as ds:
+        rows = conversion._calibration_comment_rows(ds)
+    columns = conversion._calibration_comment_columns(rows)
+    assert [c["header"] for c in columns] == [
+        "Basestation variable",
+        "Original",
+        "OG1 Sensor",
+        "Serial",
+        "Calibration",
+        "Rules (serial / date)",
+        "Note",
+    ]
+    assert abs(sum(c["width"] for c in columns) - 100) <= 2
+    no_notes = [r for r in rows if not r["note"]]
+    headers = [c["header"] for c in conversion._calibration_comment_columns(no_notes)]
+    assert "Note" not in headers and "Channel dates" not in headers
+
+
+def test_calibration_rows_override_clears_amber_and_empty_record(sg005_og1_copy):
+    """A lone-token serial is amber until sensors: corrects it; an empty record has no rows."""
+    import json
+
+    import xarray as xr
+
+    with xr.open_dataset(sg005_og1_copy, engine="netcdf4") as ds:
+        ds = ds.load()
+    records = json.loads(ds.attrs["conversion_sensor_calibration"])
+    records["SENSOR_OXYGEN_005"]["serial_rule"] = "bare-token"
+    ds.attrs["conversion_sensor_calibration"] = json.dumps(records)
+    rows = {r["name"]: r for r in conversion._calibration_comment_rows(ds)}
+    assert rows["SENSOR_OXYGEN_005"]["bad"]
+    records["SENSOR_OXYGEN_005"]["overridden"] = ["sensor_serial_number"]
+    ds.attrs["conversion_sensor_calibration"] = json.dumps(records)
+    rows = {r["name"]: r for r in conversion._calibration_comment_rows(ds)}
+    assert not rows["SENSOR_OXYGEN_005"]["bad"]
+    ds.attrs["conversion_sensor_calibration"] = "{}"
+    assert conversion._calibration_comment_rows(ds) == []
+
+
+def test_letter_serial_with_zeros_is_not_a_placeholder():
+    """F0000 is an identifier; 0000 and 00-00-0000 are the old placeholders."""
+    assert not conversion._is_placeholder("F0000")
+    assert conversion._is_placeholder("0000") and conversion._is_placeholder(
+        "00-00-0000"
+    )

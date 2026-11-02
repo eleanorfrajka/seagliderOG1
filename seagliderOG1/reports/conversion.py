@@ -359,9 +359,14 @@ def _og1_tiers(
 
 
 def _is_placeholder(value: str) -> bool:
-    """Return True for an empty value or one whose digits are all zero (``0000``, ``00-00-0000``)."""
-    digits = [c for c in value if c.isdigit()]
-    return not value.strip() or (bool(digits) and set(digits) == {"0"})
+    """Return True for an empty value, ``UNK``, or one whose digits are all zero.
+
+    Values of only zeros and dashes (``0000``, ``00-00-0000``) are the placeholders files
+    written by seagliderOG1 0.2.0 and earlier carry; a serial with letters (``F0000``) is
+    an identifier, not a placeholder.
+    """
+    text = value.strip()
+    return not text or text == "UNK" or bool(re.fullmatch(r"[0\-]*0[0\-]*", text))
 
 
 def _og1_sensor_rows(ds: xr.Dataset) -> list[dict[str, object]]:
@@ -379,8 +384,8 @@ def _og1_sensor_rows(ds: xr.Dataset) -> list[dict[str, object]]:
         "shared", "bad"}`` rows, name-sorted; ``used_by`` names the variables whose
         ``sensor`` attribute is this sensor; ``shared`` when another sensor has the same
         serial number (a basestation calibration comment copied between instruments);
-        ``bad`` when the serial or calibration date is a placeholder (empty, or every digit
-        zero) or the serial is shared.
+        ``bad`` when the serial or calibration date is a placeholder (empty, ``UNK``, or
+        every digit zero) or the serial is shared.
 
     """
     users: dict[str, list[str]] = {}
@@ -416,6 +421,118 @@ def _og1_sensor_rows(ds: xr.Dataset) -> list[dict[str, object]]:
             }
         )
     return rows
+
+
+def _calibration_comment_rows(ds: xr.Dataset) -> list[dict[str, object]] | None:
+    """Return one row per ``SENSOR_*`` variable: the basestation comment and what was read.
+
+    The left side is the source — the basestation variable the comment came from and the
+    comment as written (``original_calibcomm``); the right side is the result — the
+    ``SENSOR_*`` variable, its serial number, calibration date and per-channel dates, the
+    rules that read them, and the note and checks from the ``conversion_sensor_calibration``
+    global.
+
+    Parameters
+    ----------
+    ds : xarray.Dataset
+        An open OG1 dataset.
+
+    Returns
+    -------
+    list of dict or None
+        ``{"source_variable", "original", "name", "serial", "calibration", "channels",
+        "rules", "note", "bad"}`` rows, name-sorted; ``bad`` when the serial or the
+        calibration date is a placeholder, the serial was taken from a lone token and not
+        corrected by the mission config, or a check fired (a calibration date after the first sample or long before it, a serial
+        shared with another sensor). None when the file has no
+        ``conversion_sensor_calibration`` global (written by seagliderOG1 0.2.0 or earlier).
+
+    """
+    raw = ds.attrs.get("conversion_sensor_calibration")
+    if raw is None:
+        return None
+    records = json.loads(str(raw))
+    rows = []
+    for name in sorted(records):
+        record = records[name]
+        attrs = ds[name].attrs if name in ds.variables else {}
+        serial = str(attrs.get("sensor_serial_number", ""))
+        calibration = str(attrs.get("sensor_calibration_date", ""))
+        overridden = record.get("overridden", [])
+        notes = [record.get("note", "")] + list(record.get("checks", []))
+        notes += [f"{attr} from the mission config" for attr in overridden]
+        rows.append(
+            {
+                "source_variable": record.get("source_variable") or "—",
+                "original": str(attrs.get("original_calibcomm", "")) or "—",
+                "name": name,
+                "serial": serial,
+                "calibration": calibration,
+                "channels": str(attrs.get("sensor_calibration_dates", "")),
+                "rules": f"{record.get('serial_rule', '')} / {record.get('date_rule', '')}",
+                "note": "; ".join(n for n in notes if n),
+                "bad": _is_placeholder(serial)
+                or _is_placeholder(calibration)
+                or (
+                    record.get("serial_rule") == "bare-token"
+                    and "sensor_serial_number" not in overridden
+                )
+                or bool(record.get("checks")),
+            }
+        )
+    return rows
+
+
+#: Columns of the calibration-comments table: key, header, relative width, whether the
+#: cell wraps, and whether the column is dropped when every row leaves it empty.
+_CALIBRATION_COLUMNS = (
+    ("source_variable", "Basestation variable", 15, True, False),
+    ("original", "Original", 24, True, False),
+    ("name", "OG1 Sensor", 18, True, False),
+    ("serial", "Serial", 8, False, False),
+    ("calibration", "Calibration", 10, False, False),
+    ("channels", "Channel dates", 15, True, True),
+    ("rules", "Rules (serial / date)", 12, False, False),
+    ("note", "Note", 15, True, True),
+)
+
+
+def _calibration_comment_columns(
+    rows: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Return the calibration-comments table columns, dropping optional empty ones.
+
+    Channel dates and Note are shown only when at least one row has a value, and the
+    widths of the columns kept are rescaled to sum to 100 %, so the remaining columns
+    get the space.
+
+    Parameters
+    ----------
+    rows : list of dict
+        The rows from :func:`_calibration_comment_rows`.
+
+    Returns
+    -------
+    list of dict
+        ``{"key", "header", "width", "wrap"}`` per column kept, in table order; ``width``
+        is a percentage.
+
+    """
+    kept = [
+        (key, header, weight, wrap)
+        for key, header, weight, wrap, optional in _CALIBRATION_COLUMNS
+        if not optional or any(row.get(key) for row in rows)
+    ]
+    total = sum(weight for _, _, weight, _ in kept)
+    return [
+        {
+            "key": key,
+            "header": header,
+            "width": round(100 * weight / total),
+            "wrap": wrap,
+        }
+        for key, header, weight, wrap in kept
+    ]
 
 
 def _og1_candidate_groups(
@@ -2491,6 +2608,12 @@ def render_conversion(
         og1_candidate_groups = _og1_candidate_groups(ds, ledger, valid_by_name)
         og1_named, og1_carried = _og1_tiers(ds, ledger, valid_by_name)
         og1_sensors = _og1_sensor_rows(ds)
+        calibration_comments = _calibration_comment_rows(ds)
+        calibration_columns = (
+            _calibration_comment_columns(calibration_comments)
+            if calibration_comments
+            else []
+        )
         duplicate_groups = _duplicate_groups(ds)
         reconciliation, reconciliation_caption = _reconciliation(ds, ledger)
         # The fate rows excluding the input-total row (the last), for the histogram.
@@ -2527,7 +2650,12 @@ def render_conversion(
         global_groups, globals_source = nc_tables.globals_rows(
             ds,
             extras=design.ATTR_GROUP_EXTRAS,
-            exclude=["history", "conversion_attribute_sources", "conversion_units"],
+            exclude=[
+                "history",
+                "conversion_attribute_sources",
+                "conversion_units",
+                "conversion_sensor_calibration",
+            ],
             requirement=requirement_labels,
         )
         coverage_computed = _coverage_computed(ds)
@@ -2577,6 +2705,8 @@ def render_conversion(
         og1_candidate_groups=og1_candidate_groups,
         og1_named=og1_named,
         og1_sensors=og1_sensors,
+        calibration_comments=calibration_comments,
+        calibration_columns=calibration_columns,
         og1_carried=og1_carried,
         duplicate_groups=duplicate_groups,
         reconciliation=reconciliation,
