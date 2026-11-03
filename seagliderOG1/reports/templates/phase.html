@@ -1,0 +1,120 @@
+{% import "_nav.html" as navm -%}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ title }} — phase</title>
+<style>
+{{ css | safe }}
+section { margin: 1.4rem 0; }
+pre.pseudocode { font-size: 0.85em; line-height: 1.35; background: var(--bg-sunken); padding: 0.8rem; overflow-x: auto; }
+tr.row-bad td { background: var(--warn-bg); }
+h3.table-title { font-size: 1em; margin: 1rem 0 0.3rem; }
+td.swatch span { display: inline-block; width: 0.9em; height: 0.9em; border-radius: 2px; vertical-align: middle; }
+</style>
+</head>
+<body>
+<div id="top"></div>
+<div class="masthead">
+  <div class="masthead-header">
+    <h1>{{ title }}</h1>
+    <span class="masthead-type">phase</span>
+  </div>
+  <p class="sub" style="margin:0 0 0.6rem; display:flex; justify-content:space-between; gap:1rem;"><span>{{ title }}</span><span>generated {{ generated_at }}</span></p>
+  {{ navm.page_nav(page_nav) }}
+  <a class="wordmark" href="https://github.com/ocean-uhh/seagliderOG1">seagliderOG1</a>
+</div>
+
+<nav class="jump-nav"><a href="#counts">OG1 phase counts</a> · <a href="#dive">Example dive cycles</a>{% if p.scatter_png %} · <a href="#pitch">Pitch and dP/dt</a>{% endif %} · <a href="#method">Algorithm</a> · <a href="#states">Seaglider state table</a> · <a href="#qc">PHASE_QC</a></nav>
+<p class="caption"><code>PHASE</code> says what the glider was doing at each data point, in the <a href="{{ p.vocabulary }}">OG1 phase vocabulary</a>. How phase should be assigned is under discussion in the OceanGliders community.</p>
+
+<section id="counts">
+<h2>1. OG1 phase counts</h2>
+<p class="caption">Every OG1 phase id, with the number of data points (entries on <code>N_MEASUREMENTS</code>) assigned it over the {{ p.n_dives }} dive{{ "s" if p.n_dives != 1 }}, its share of all data points, and the number of dives it appears in. We use the <a href="https://github.com/OceanGlidersCommunity/OG-format-user-manual/blob/main/vocabularyCollection/phase_translation_tables.md">OG1 phase translation table</a> to determine how to assign phase for Seagliders. 6 (propelled) and 7 (transition) are never assigned to a Seaglider.</p>
+<table class="nc">
+<thead><tr><th></th><th>id</th><th>phase</th><th>Count</th><th>%</th><th>dives</th></tr></thead>
+<tbody>
+{%- for r in p.rows %}
+<tr><td class="swatch"><span style="background: {{ r.color }}"></span></td><td>{{ r.id }}</td><td>{{ r.name }}</td><td>{{ r.rows }}</td><td>{{ r.share }}</td><td>{{ r.dives }}</td></tr>
+{%- endfor %}
+</tbody></table>
+<p class="caption"><strong>Dive fraction in each phase.</strong> Top: the fraction of data points from each dive spent in each phase. Bottom: the dive's maximum pressure (gray bars, left axis) and duration from first to last data points (dots, right axis).</p>
+{%- if p.bars_png %}
+<figure{% if p.bars_slot %} class="{{ p.bars_slot }}"{% endif %}>
+<img alt="Per-dive share of data points in each phase, with maximum pressure and duration" src="data:image/png;base64,{{ p.bars_png }}">
+{%- if show_source and p.bars_source %}<figcaption class="fig-source">source: {{ p.bars_source }}</figcaption>{% endif %}
+</figure>
+{%- endif %}
+</section>
+
+<section id="dive">
+<h2>2. Example dive cycles</h2>
+<p class="caption">Plots below show how phase is assigned against dive cycles. Up to three are chosen to demonstrate how the rules apply. The x-axis is time and the panels show the pressure (each data point colored by its <code>PHASE</code>, with some of the commanded depths in dashed horizontal lines), pitch, the guidance and control (G&amp;C) events' VBD setting, the glider's state table (<code>gc_state_state</code>, if available), and <code>PHASE</code> as a band. Dotted lines show the start of each G&amp;C event. Yellow vertical lines are the GPS fixes. Note that when the CTD does not sample at the surface, there is no colored pressure line.</p>
+{%- for f in p.dive_figures %}
+<h3>Dive {{ f.dive }}{% if not f.complete %} (no descent, inflection and ascent){% endif %}</h3>
+{%- if f.png %}
+<figure>
+<img alt="Dive {{ f.dive }}: pressure, pitch, G&amp;C VBD, state table and PHASE" src="data:image/png;base64,{{ f.png }}">
+{%- if show_source and f.source %}<figcaption class="fig-source">source: {{ f.source }}</figcaption>{% endif %}
+</figure>
+{%- endif %}
+{%- endfor %}
+</section>
+
+{%- if p.scatter_png %}
+<section id="pitch">
+<h2>3. Pitch and dP/dt</h2>
+<p class="caption">Dive {{ p.dives|join(", ") }}: pitch against the rate of pressure change, colored by <code>PHASE</code>. Descent sits at negative pitch and positive dP/dt (i.e., increasing pressure), ascent at positive pitch and negative dP/dt; inflection lies between them. Descent points at steep negative pitch and dP/dt near zero are the glider bleeding at the surface before the flare; ascent points at positive pitch with dP/dt still positive are the glider still sinking after the apogee ends. Pitch is interpolated in time onto the pressure data points.</p>
+<figure{% if p.scatter_slot %} class="{{ p.scatter_slot }}"{% endif %}>
+<img alt="Pitch against dP/dt colored by PHASE" src="data:image/png;base64,{{ p.scatter_png }}">
+{%- if show_source and p.scatter_source %}<figcaption class="fig-source">source: {{ p.scatter_source }}</figcaption>{% endif %}
+</figure>
+</section>
+{%- endif %}
+
+<section id="method">
+<h2>{{ 4 if p.scatter_png else 3 }}. Algorithm</h2>
+<p class="caption">The code: <code>PHASE</code> is assigned by <code>assign()</code> in <code>seagliderOG1/_phase.py</code>, called through the public wrapper <code>seagliderOG1.tools.add_phase()</code>; <code>PROFILE_NUMBER</code>, <code>PROFILE_DIRECTION</code> and <code>SEGMENT_NUMBER</code> follow from it in <code>tools.add_profiles()</code>.</p>
+<p class="caption">The file's <code>phase_calculation_method</code>:</p>
+<p>{{ p.method }}</p>
+<p class="caption">The algorithm as the code runs it, per dive. Step 2 overrides step 1; step 3 fills what is left.</p>
+<pre class="pseudocode">{{ p.pseudocode }}</pre>
+<h3 class="table-title">Variables used by the algorithm</h3>
+<p class="caption">Each variable the algorithm reads, and whether this file has it. "Check only" variables are drawn on the figures above but never set a phase.</p>
+<table class="nc">
+<thead><tr><th>Variable</th><th>Used for</th><th>In this file</th></tr></thead>
+<tbody>
+{%- for r in p.inputs %}
+<tr><td><code>{{ r.name }}</code></td><td>{{ r.use }}</td><td>{{ r.present }}</td></tr>
+{%- endfor %}
+</tbody></table>
+</section>
+
+<section id="states">
+<h2>{{ 5 if p.scatter_png else 4 }}. Seaglider state table</h2>
+<p class="caption">Every state the Seaglider basestation numbers in <code>gc_state_state</code>, in begin/end pairs. Each begin state of a pair sets the <code>PHASE</code> the <a href="https://github.com/OceanGlidersCommunity/OG-format-user-manual/blob/main/vocabularyCollection/phase_translation_tables.md">OG1 phase translation table</a> specifies the transition, held until the next listed pair begins; a pair the table does not list is ignored, so the phase before it holds. Count: how many times the begin state appears in this file. Ended with: the end-of-phase codes (<code>gc_state_eop_code</code>) the end state carried. Names and numbers: the basestation's own list.</p>
+<table class="nc">
+<thead><tr><th>Transition</th><th>States</th><th></th><th>PHASE</th><th>Phase from</th><th>Count</th><th>Ended with</th></tr></thead>
+<tbody>
+{%- for r in p.states %}
+<tr><td>{{ r.transition }}</td><td>{{ r.states }}</td><td class="swatch"><span style="background: {{ r.color }}"></span></td><td>{{ r.phase }}</td><td>{{ r.source }}</td><td>{{ r.count }}</td><td>{{ r.eop }}</td></tr>
+{%- endfor %}
+</tbody></table>
+</section>
+
+<section id="qc">
+<h2>{{ 6 if p.scatter_png else 5 }}. PHASE_QC differences from OG1</h2>
+<p class="caption"><code>PHASE_QC</code> is 0 (no QC performed) on every data point. Amber: an attribute this file writes differently from the OG1 format table, following the <a href="https://cfconventions.org/Data/cf-conventions/cf-conventions-1.10/cf-conventions.html#flags">CF conventions for flags</a> instead; the reason is given for each, and both are points to take to the OG1 format group.</p>
+<table class="nc">
+<thead><tr><th>Attribute</th><th>OG1 format table</th><th>This file</th><th>Why</th></tr></thead>
+<tbody>
+<tr class="row-bad"><td><code>_FillValue</code></td><td><code>" "</code></td><td>none</td><td>a string fill value cannot be stored on a byte variable; every data point has a value (0), so none is needed</td></tr>
+<tr class="row-bad"><td><code>flag_meanings</code></td><td>"No QC has been applied, Good data, Probably good data, Probably bad data, Bad data"</td><td><code>{{ p.qc_meanings }}</code></td><td>CF pairs <code>flag_meanings</code> with <code>flag_values</code> by space-separated words; the OG1 phrase splits into 15 words for 5 values</td></tr>
+</tbody></table>
+</section>
+
+<footer>Generated by seagliderOG1 v{{ version }} &nbsp;&middot;&nbsp; {{ generated_at }}</footer>
+{{ js_top_links | safe }}
+</body>
+</html>

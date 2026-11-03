@@ -10,6 +10,19 @@ old → new API table and output-format detail for the 0.1.0 break are in the mi
 
 ### Breaking changes
 
+- `PHASE` is assigned from the glider's state table (`gc_state_state`), or its G&C events when
+  the file has no state table, or pressure alone, following the OG1 phase translation table;
+  GPS fixes are surfacing (3); pairs the table does not list (the surface coast) are ignored. Files now carry surfacing, inflection (5)
+  and parking (4, a loiter); before, `PHASE` was descent to the pressure maximum and ascent
+  after. `PHASE` is a byte with `_FillValue` 0, `flag_values`/`flag_meanings` from the OG1
+  vocabulary and `phase_calculation_method` naming the signal per dive; `PHASE_QC` is 0 (no QC)
+  with the OG1 flag scale. Reconvert. See *How the phase is assigned* in the docs.
+- `PROFILE_NUMBER` follows `PHASE` as OG1 defines it: one number per run of descent or ascent,
+  -9999 on every other data point; it was the dive split at the pressure maximum, every data point
+  numbered. `tools.add_profile_number` (and `assign_profile_number`) is removed: call
+  `tools.add_phase`, then `tools.add_profiles`.
+  New: `PROFILE_DIRECTION` (1/-1/0) and `SEGMENT_NUMBER` (+1 on each entry to surfacing).
+- `DIVE_NUMBER` is renamed `dive_number` (lower case: not an OG1 variable). Rename it in your code.
 - Sensor serial numbers and calibration dates are read from the calibration comments by named
   rules; files differ from 0.2.0 wherever the old parser was wrong. Reconvert. On the samples:
 
@@ -34,6 +47,9 @@ old → new API table and output-format detail for the 0.1.0 break are in the mi
 
 ### Added
 
+- A phase page, `<id>_phase.html`, is written beside the conversion page (`process --report`,
+  `report`): how `PHASE` was assigned, rows per phase, one dive from the middle of the
+  mission, every dive's phase shares with its depth and duration, and pitch against dP/dt.
 - `SA`, `CT` and `POTDENS0` (TEOS-10, via gsw) are added when the basestation does not write them;
   `PSAL` is computed from conductivity only when a file has no salinity. Each carries `sources` and
   a `comment` naming the gsw function and version, and is listed in `conversion_derived_variables`.
@@ -66,6 +82,8 @@ old → new API table and output-format detail for the 0.1.0 break are in the mi
 
 ### Fixed
 
+- Basestation 2.10 files (`gc_state_secs` written as seconds from the dive start) no longer put rows
+  in January 1970; the output name and `time_coverage_start` take the dive's real start.
 - A current-year calibration date is no longer rejected, and the same comment no longer parses
   differently from one year to the next: the parser does not read today's date.
 

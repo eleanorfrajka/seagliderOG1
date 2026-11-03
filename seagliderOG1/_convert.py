@@ -474,7 +474,11 @@ _MANDATORY_OG1_VARS = frozenset(
         "TRAJECTORY",
         "WMO_IDENTIFIER",
         "PROFILE_NUMBER",
+        "PROFILE_DIRECTION",
+        "SEGMENT_NUMBER",
         "PHASE",
+        "PHASE_QC",
+        "dive_number",
     }
 )
 _MANDATORY_OG1_PREFIXES = ("PLATFORM_", "SENSOR_", "DEPLOYMENT_")
@@ -1284,6 +1288,11 @@ def convert(
     ds_og1, og1_mapping = _pipeline.add_scalar_parameters(
         ds_og1, extracted, og1_mapping
     )
+    # PHASE again over the whole mission, now the piloting scalars are in (log_D_FLARE
+    # sets the transition), so phase_calculation_method names every dive.
+    ds_og1 = tools.add_phase(ds_og1)
+    # PROFILE_NUMBER, PROFILE_DIRECTION and SEGMENT_NUMBER follow from PHASE (OG1).
+    ds_og1 = tools.add_profiles(ds_og1)
 
     # Resolve platform fields from the config and the first file (no silent
     # fallbacks: missing serial raises, other strings warn + "UNK", the numeric
@@ -1994,6 +2003,13 @@ def _convert_mission(
         page.parent.mkdir(parents=True, exist_ok=True)
         page.write_text(render_conversion(path), encoding="utf-8")
         _log.info("wrote %s", page)
+        if not draft:
+            # A draft is for setting up the mission metadata; no phase page.
+            from seagliderOG1.reports.phase import write_phase_page
+
+            phase_page = write_phase_page(path, page)
+            if phase_page is not None:
+                _log.info("wrote %s", phase_page)
     return path
 
 
@@ -2081,7 +2097,7 @@ def process_dataset(
             - Adds GPS info as LATITUDE_GPS, LONGITUDE_GPS, and TIME_GPS (increasing the length of N_MEASUREMENTS).
             - Adds the divenum as a variable of length N_MEASUREMENTS.
             - Adds the PROFILE_NUMBER (odd for dives, even for ascents).
-            - Adds the PHASE of the dive (1 for ascent, 2 for descent, 3 for between the first two surface points).
+            - Adds PHASE and PHASE_QC from the state table, G&C events, GPS fixes or pressure (see tools.add_phase).
             - Adds the DEPTH_Z with positive up.
         4. Returns the processed dataset, attribute warnings, and categorized datasets.
 
@@ -2095,6 +2111,7 @@ def process_dataset(
             xr.Dataset(),
             [],
         )
+    ds1_base = _pipeline._absolute_state_times(ds1_base)
     # Split the dataset by unique dimensions
     split_ds = tools.split_by_unique_dims(ds1_base)
 
@@ -2113,16 +2130,15 @@ def process_dataset(
         unit_corrections=unit_corrections,
     )
 
-    # Add new variables to the dataset (GPS, DIVE_NUMBER, PROFILE_NUMBER, PHASE)
+    # Add new variables to the dataset (GPS, dive_number, PROFILE_NUMBER, PHASE)
     # -----------------------------------------------------------------------
     # Add the gps_info to the dataset
     # Must be after split_by_unique_dims and after rename_dimensions
     ds_gps = split_ds[("gps_info",)]
     ds_new = add_gps_info_to_dataset(ds_new, ds_gps)
-    # Add the profile number (odd for dives, even for get_sgscents)
-    ds_new = tools.add_profile_number(ds_new, ds1_base)
-    # Assign the phase of the dive (must be after adding divenum)
-    ds_new = tools.add_phase(ds_new)
+    # dive_number per dive; PROFILE_NUMBER is set once, from PHASE, over the whole mission
+    # (tools.add_profiles).
+    ds_new = tools.add_dive_number(ds_new, ds1_base.attrs["dive_number"])
     # Assign DEPTH_Z to the dataset where positive is up.
     ds_new = tools.add_depth(ds_new)
 

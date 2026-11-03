@@ -1589,16 +1589,28 @@ def _masthead_meta(ds: xr.Dataset, ledger: dict) -> list[tuple[str, str]]:
     return meta
 
 
-def _page_nav(has_inventory: bool = False) -> dict:
+def _page_nav(
+    has_inventory: bool = False,
+    *,
+    current: str = "conversion",
+    conversion_href: str = "",
+    phase_href: str = "",
+) -> dict:
     """Return the page-nav structure for the vendored ``page_nav`` macro.
 
-    The conversion page is current; the inventory page is a link when it exists and a
-    disabled "not yet generated" pill otherwise.
+    One pill per page: conversion, phase (when the file has ``PHASE``) and inventory. The
+    current page's pill is marked current; the others link, or show "not yet generated".
 
     Parameters
     ----------
     has_inventory : bool, default False
         Whether an inventory page exists to link to.
+    current : {"conversion", "phase"}, default "conversion"
+        The page this nav sits on.
+    conversion_href : str, optional
+        The conversion page's file name, for the pill on the phase page.
+    phase_href : str, optional
+        The phase page's file name; no phase pill when empty.
 
     Returns
     -------
@@ -1606,27 +1618,19 @@ def _page_nav(has_inventory: bool = False) -> dict:
         ``{"rows": [...]}`` for ``page_nav``.
 
     """
-    return {
-        "rows": [
-            {
-                "label": "",
-                "pills": [
-                    {
-                        "role": "conversion",
-                        "state": "current",
-                        "label": "conversion",
-                        "href": "",
-                    },
-                    {
-                        "role": "inventory",
-                        "state": "link" if has_inventory else "missing",
-                        "label": "inventory",
-                        "href": "inventory.html" if has_inventory else "",
-                    },
-                ],
-            }
-        ]
-    }
+
+    def pill(role: str, href: str) -> dict[str, str]:
+        if role == current:
+            return {"role": role, "state": "current", "label": role, "href": ""}
+        if href:
+            return {"role": role, "state": "link", "label": role, "href": href}
+        return {"role": role, "state": "missing", "label": role, "href": ""}
+
+    pills = [pill("conversion", conversion_href)]
+    if phase_href or current == "phase":
+        pills.append(pill("phase", phase_href))
+    pills.append(pill("inventory", "inventory.html" if has_inventory else ""))
+    return {"rows": [{"label": "", "pills": pills}]}
 
 
 def _format_bytes(total: int | None) -> str:
@@ -2735,7 +2739,12 @@ def render_conversion(
         version=__version__,
         generated_at=datetime.now(UTC).isoformat(timespec="seconds"),
         masthead_meta=masthead_meta,
-        page_nav=_page_nav(),
+        page_nav=_page_nav(
+            # No phase page beside a draft.
+            phase_href=writers.phase_page_path(path).name
+            if "PHASE" in ds.variables and not draft
+            else ""
+        ),
         summary_rows=summary_rows,
         unit_corrections_rows=unit_corrections_rows,
         verdict_clauses=verdict_clauses,

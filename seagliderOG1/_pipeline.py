@@ -1206,7 +1206,9 @@ def _del_capital_letters(string: str) -> str:
 INTEGER_VARIABLES: dict[str, type] = {
     "PHASE": np.int8,
     "PROFILE_NUMBER": np.int16,
-    "DIVE_NUMBER": np.int16,
+    "SEGMENT_NUMBER": np.int16,
+    "PROFILE_DIRECTION": np.int8,
+    "dive_number": np.int16,
     "VBD_MIN_CNTS": np.int16,
 }
 
@@ -2302,6 +2304,57 @@ def _validate_coords(ds1: xr.Dataset) -> xr.Dataset:
 
         ds1 = xr.Dataset()
     return ds1
+
+
+def _absolute_state_times(ds1: xr.Dataset) -> xr.Dataset:
+    """Return ``ds1`` with ``gc_state_secs`` as times, not seconds from the dive start.
+
+    Basestation 2.10 writes ``gc_state_secs`` as seconds elapsed since the dive started,
+    although its comment says GMT epoch; read as epoch they fall in January 1970 and sort
+    ahead of every sample. When every value lies before 1990 and the file has a
+    ``start_time`` global (unix seconds), the dive start is added and an INFO line says so.
+
+    Parameters
+    ----------
+    ds1 : xarray.Dataset
+        One basestation dive file.
+
+    Returns
+    -------
+    xarray.Dataset
+        ``ds1``, with ``gc_state_secs`` shifted by the dive start when it was elapsed seconds.
+    """
+    if "gc_state_secs" not in ds1.variables:
+        return ds1
+    secs = ds1["gc_state_secs"]
+    if np.issubdtype(secs.dtype, np.datetime64):
+        values = secs.values.astype("datetime64[ns]").astype("int64") / 1e9
+    else:
+        values = secs.values.astype(float)
+    finite = np.isfinite(values)
+    if not finite.any() or values[finite].max() >= _ELAPSED_SECONDS_LIMIT:
+        return ds1
+    if "start_time" not in ds1.attrs:
+        _log.warning(
+            "%s: gc_state_secs are seconds from the dive start but the file has no "
+            "start_time; the state table is left in January 1970 and not used for PHASE.",
+            ds1.attrs.get("id", "dive"),
+        )
+        return ds1
+    start = float(ds1.attrs["start_time"])
+    if np.issubdtype(secs.dtype, np.datetime64):
+        new = secs.values + np.timedelta64(round(start * 1e9), "ns")
+    else:
+        new = values + start
+    _log.info(
+        "%s: gc_state_secs are seconds from the dive start; added start_time.",
+        ds1.attrs.get("id", "dive"),
+    )
+    return ds1.assign(gc_state_secs=(secs.dims, new, secs.attrs))
+
+
+#: Unix seconds for 1990-01-01: a ``gc_state_secs`` below this is elapsed seconds.
+_ELAPSED_SECONDS_LIMIT = 631152000.0
 
 
 def _validate_dims(ds: xr.Dataset, expected_dims: str = "N_MEASUREMENTS") -> bool:

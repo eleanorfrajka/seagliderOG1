@@ -159,7 +159,9 @@ def test_demo_config_institution_is_one_record_in_people_and_institutions():
     from seagliderOG1.reports import design
     from seagliderOG1.reports._vendored import nc_tables
 
-    config = yaml.safe_load((pathlib.Path(DATA) / "mission.yaml").read_text())
+    config = yaml.safe_load(
+        (pathlib.Path(DATA) / "mission.yaml").read_text(encoding="utf-8")
+    )
     ds = _convert.convert(
         readers.read_mission(DATA, 1, 1), institutions=config["institutions"]
     )
@@ -1013,3 +1015,37 @@ def test_letter_serial_with_zeros_is_not_a_placeholder():
     assert conversion._is_placeholder("0000") and conversion._is_placeholder(
         "00-00-0000"
     )
+
+
+def test_phase_page_beside_the_conversion_page(tmp_path) -> None:
+    """report() writes <stem>_phase.html beside the conversion page; the two link each other;
+    a file without PHASE gets no phase page and no phase pill."""
+    import xarray as xr
+
+    from seagliderOG1 import writers
+    from seagliderOG1.reports import phase as phase_page
+    from seagliderOG1.reports import report
+
+    path = _convert._convert_mission(DATA, tmp_path / "a", dives=(1, 3))
+    page = report(path, overwrite=True)
+    written = writers.phase_page_path(path)
+    assert written.exists()
+    html = written.read_text(encoding="utf-8")
+    assert (
+        "Dive 2, 3:" in html
+    )  # three dives: 2 near the start, then middle and end thirds
+    assert html.count("data:image/png;base64") >= 4
+    assert "gc_state_state" in html and "for each dive:" in html
+    assert (
+        html.index('id="counts"') < html.index('id="dive"') < html.index('id="method"')
+    )
+    assert html.index('id="method"') < html.index('id="states"') < html.index('id="qc"')
+    assert "14 → 15" in html and 'class="row-bad"' in html
+    assert f'href="{page.name}"' in html
+    assert f'href="{written.name}"' in page.read_text(encoding="utf-8")
+    stripped = tmp_path / "b" / path.name
+    stripped.parent.mkdir()
+    with xr.open_dataset(path) as ds:
+        ds.drop_vars(["PHASE", "PHASE_QC"]).to_netcdf(stripped)
+    assert phase_page.render_phase(stripped) is None
+    assert phase_page.write_phase_page(stripped, stripped.with_suffix(".html")) is None

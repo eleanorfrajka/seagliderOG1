@@ -11,14 +11,14 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 
-from seagliderOG1 import vocabularies
+from seagliderOG1 import _phase, vocabularies
 
 _log = logging.getLogger(__name__)
 
 __all__ = [
     "add_depth",
     "add_phase",
-    "add_profile_number",
+    "add_profiles",
     "add_dive_number",
     "convert_qc_flags",
     "encode_times_og1",
@@ -55,143 +55,90 @@ def add_dive_number(ds: xr.Dataset, dive_number: int | None = None) -> xr.Datase
     dive_var = xr.DataArray(
         np.full(ds.sizes["N_MEASUREMENTS"], dive_number),
         dims=["N_MEASUREMENTS"],
-        attrs=dict(vocabularies.vocab_attrs["DIVE_NUMBER"]),
+        attrs=dict(vocabularies.vocab_attrs["dive_number"]),
     )
-    return ds.assign(DIVE_NUMBER=dive_var)
-
-
-def add_profile_number(ds: xr.Dataset, ds1: xr.Dataset) -> xr.Dataset:
-    """Assign profile numbers to measurements based on dive phases (down/up casts).
-
-    This function separates each dive into two profiles: descent (down cast) and
-    ascent (up cast) phases. The dive is split at the maximum pressure point,
-    with the descent phase getting the dive number and ascent getting dive + 0.5.
-    Profile numbers are then calculated as 2 * DIVE_NUMBER - 1.
-
-    Parameters
-    ----------
-    ds
-        The dataset to add profile numbers to.
-    ds1
-        Dataset containing dive number information in attributes.
-
-    Returns
-    -------
-    xarray.Dataset
-        Dataset with 'DIVE_NUMBER' and 'PROFILE_NUMBER' variables added.
-
-    Notes
-    -----
-    - Requires pressure variable (PRES)
-    """
-    dive_number = ds1.attrs["dive_number"]
-    ds = add_dive_number(ds, dive_number)
-
-    fill_value = -9999
-    profile_numbers = np.full(ds.sizes["N_MEASUREMENTS"], fill_value, dtype=int)
-
-    if profile_numbers.size and not np.isnan(dive_number):
-        pmax_index = int(np.nanargmax(ds["PRES"].values))
-
-        profile_numbers[: pmax_index + 1] = 2 * dive_number - 1
-        profile_numbers[pmax_index + 1 :] = 2 * dive_number
-
-    ds = ds.assign(
-        PROFILE_NUMBER=xr.DataArray(
-            profile_numbers,
-            dims=["N_MEASUREMENTS"],
-            # Built here, not mapped from a basestation variable, so the vocabulary
-            # attributes are applied here (copied: vocab_attrs is shared).
-            attrs=dict(vocabularies.vocab_attrs["PROFILE_NUMBER"]),
-        )
-    )
-    ds["PROFILE_NUMBER"].encoding["_FillValue"] = fill_value
-
-    return ds
+    return ds.assign(dive_number=dive_var)
 
 
 def add_phase(ds: xr.Dataset) -> xr.Dataset:
-    """Add 'PHASE' and 'PHASE_QC' variables indicating the phase of each measurement.
+    """Add ``PHASE`` and ``PHASE_QC``: what the glider was doing at each sample.
 
-    The phase is determined from the pressure readings ('PRES') for each unique
-    dive number ('dive_num').
+    ``PHASE`` takes the OG1 phase vocabulary ids (``phase_vocabulary``): 1 ascent,
+    2 descent, 3 surfacing, 5 inflection, 0 unknown. Per dive it comes from the glider's
+    state table (``gc_state_state``) where the file has one, otherwise from the
+    guidance-and-control events (the apogee is the event that moves the VBD to zero),
+    otherwise from pressure alone (descent to the pressure maximum, ascent after). GPS
+    fixes are surfacing. ``phase_calculation_method`` says which signal assigned which
+    dives. No quality control is applied: ``PHASE_QC`` is 0 throughout.
 
     Parameters
     ----------
     ds : xarray.Dataset
-        The input dataset containing 'dive_num' and 'PRES' variables.
+        A dataset on ``N_MEASUREMENTS`` with ``TIME``, ``PRES``, a dive-number variable
+        (``dive_number``, ``divenum``, ``dive_num``, or ``DIVE_NUMBER`` in files from before 0.3.0) and, where the
+        basestation wrote them, ``TIME_GPS``, ``gc_state_state``, ``gc_vbd_ctl`` and
+        ``gc_end_secs``.
 
     Returns
     -------
     xarray.Dataset
-        The dataset with additional 'PHASE' and 'PHASE_QC' variables, where:
+        ``ds`` with ``PHASE`` (int8, ``_FillValue`` 0) and ``PHASE_QC`` (int8, all 0).
 
-        - 'PHASE' indicates the phase of each measurement:
-            - Phase 2 up to and including the maximum pressure point.
-            - Phase 1 after the maximum pressure point.
-        - 'PHASE_QC' is an additional variable with no QC applied.
+    Raises
+    ------
+    ValueError
+        If ``ds`` has no dive-number variable.
 
     Notes
     -----
-    In this formulation, we are only separating into dives and climbs based on
-    when the glider is at the maximum depth. Future work needs to separate out
-    the other phases and generate a PHASE_QC:
+    The phase vocabulary:
     https://github.com/OceanGlidersCommunity/OG-format-user-manual/blob/main/vocabularyCollection/phase.md
     """
-    # Determine the correct keystring for divenum
-    if "dive_number" in ds.variables:
-        divenum_str = "dive_number"
-    elif "divenum" in ds.variables:
-        divenum_str = "divenum"
-    elif "dive_num" in ds.variables:
-        divenum_str = "dive_num"
-    elif "DIVE_NUMBER" in ds.variables:
-        divenum_str = "DIVE_NUMBER"
-    else:
-        raise ValueError("No valid dive number variable found in the dataset.")
-    # Initialize the new variable with the same dimensions as dive_num
-    ds["PHASE"] = (
-        ["N_MEASUREMENTS"],
-        np.full(ds.sizes["N_MEASUREMENTS"], np.nan),
-        dict(vocabularies.vocab_attrs["PHASE"]),
-    )
-    # Initialize the new variable PHASE_QC with the same dimensions as dive_num
+    phase, methods = _phase.assign(ds)
+    attrs = dict(vocabularies.vocab_attrs["PHASE"])
+    attrs["flag_values"] = np.array(list(_phase.PHASE_NAMES), "int8")
+    attrs["flag_meanings"] = " ".join(_phase.PHASE_NAMES.values())
+    attrs["phase_calculation_method"] = _phase.method_text(methods)
+    attrs["phase_calculation_method_vocabulary"] = ""
+    attrs["ancillary_variables"] = "PHASE_QC"
+    ds["PHASE"] = (["N_MEASUREMENTS"], phase, attrs)
+    ds["PHASE"].encoding["_FillValue"] = np.int8(0)
     ds["PHASE_QC"] = (
         ["N_MEASUREMENTS"],
-        np.zeros(ds.sizes["N_MEASUREMENTS"], dtype=int),
+        np.zeros(phase.size, dtype="int8"),
+        dict(_phase.PHASE_QC_ATTRS),
     )
+    return ds
 
-    # Iterate over each unique dive_num
-    for dive in np.unique(ds[divenum_str]):
-        # Get the indices for the current dive
-        dive_indices = np.where(ds[divenum_str] == dive)[0]
-        # Find the start and end index for the current dive
-        start_index = dive_indices[0]
-        end_index = dive_indices[-1]
 
-        # Find the index of the maximum pressure between start_index and end_index
-        pmax = np.nanmax(ds["PRES"][start_index : end_index + 1].values)
+def add_profiles(ds: xr.Dataset) -> xr.Dataset:
+    """Add ``PROFILE_NUMBER``, ``PROFILE_DIRECTION`` and ``SEGMENT_NUMBER`` from ``PHASE``.
 
-        # Find the index where PRES attains the value pmax between start_index and end_index
-        pmax_index = start_index + np.argmax(
-            ds["PRES"][start_index : end_index + 1].values == pmax
-        )
+    As the OG1 format defines them: a profile is a run of descent (2) or ascent (1) rows,
+    numbered from 1 in time order, with ``PROFILE_NUMBER`` -9999 (its ``_FillValue``) on
+    every other row; ``PROFILE_DIRECTION`` is 1 descending, -1 ascending, 0 otherwise
+    (``_FillValue`` 0); ``SEGMENT_NUMBER`` starts at 1 and increments each time the glider
+    enters surfacing (3).
 
-        # Assign phase 2 to all values up to and including the point where pmax is reached
-        ds["PHASE"][start_index : pmax_index + 1] = 2
+    Parameters
+    ----------
+    ds : xarray.Dataset
+        A dataset on ``N_MEASUREMENTS``, sorted by ``TIME``, with ``PHASE``.
 
-        # Assign phase 1 to all values after pmax is reached
-        ds["PHASE"][pmax_index + 1 : end_index + 1] = 1
-
-        # Assign phase 3 to the time at the beginning of the dive, between the first valid TIME_GPS and the second valid TIME_GPS
-        valid_time_gps_indices = np.where(
-            ~np.isnan(ds["TIME_GPS"][start_index : end_index + 1].values)
-        )[0]
-        if len(valid_time_gps_indices) >= 2:
-            first_valid_index = start_index + valid_time_gps_indices[0]
-            second_valid_index = start_index + valid_time_gps_indices[1]
-            ds["PHASE"][first_valid_index : second_valid_index + 1] = 3
-
+    Returns
+    -------
+    xarray.Dataset
+        ``ds`` with the three variables.
+    """
+    phase = np.nan_to_num(np.asarray(ds["PHASE"].values, dtype=float)).astype("int8")
+    number, direction, segment = _phase.profiles(phase)
+    for name, values, attrs, fill in (
+        ("PROFILE_NUMBER", number, _phase.PROFILE_NUMBER_ATTRS, _phase.NUMBER_FILL),
+        ("PROFILE_DIRECTION", direction, _phase.PROFILE_DIRECTION_ATTRS, 0),
+        ("SEGMENT_NUMBER", segment, _phase.SEGMENT_NUMBER_ATTRS, _phase.NUMBER_FILL),
+    ):
+        ds[name] = (["N_MEASUREMENTS"], values, dict(attrs))
+        ds[name].encoding["_FillValue"] = values.dtype.type(fill)
     return ds
 
 
@@ -391,9 +338,6 @@ from seagliderOG1 import _deprecated  # noqa: E402  # shims follow the definitio
 
 calc_Z = _deprecated._renamed(add_depth, "tools.calc_Z", "tools.add_depth")
 assign_phase = _deprecated._renamed(add_phase, "tools.assign_phase", "tools.add_phase")
-assign_profile_number = _deprecated._renamed(
-    add_profile_number, "tools.assign_profile_number", "tools.add_profile_number"
-)
 
 # The three unit helpers now resolve through the units view (vocabularies.UNITS); the ad-hoc
 # unit tables they used are gone. Kept as warning shims for one release (removed 0.3.0).

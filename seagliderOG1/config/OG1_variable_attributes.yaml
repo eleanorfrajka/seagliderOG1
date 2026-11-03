@@ -370,16 +370,17 @@ BUOYANCY:
   long_name: Buoyancy of vehicle, corrected for compression effects
   units: g
 PROFILE_NUMBER:
-  long_name: profile index
+  long_name: Identifier of numbered profile within the dataset
   units: '1'
-DIVE_NUMBER:
+dive_number:
   long_name: dive number
   units: '1'
 PHASE:
   long_name: behavior of the glider at sea
-  comment: This is based only on splitting each dive cycle into the period before
-    the glider reaches the maximum pressure of that cycle (descent, PHASE=2) and the
-    period after the glider reaches the maximum pressure of that cycle (ascent, PHASE=1)
+  comment: From the glider's state table (gc_state_state) where the file has one,
+    otherwise from the guidance-and-control events (the apogee is the event that moves
+    the VBD to zero), otherwise from pressure; GPS fixes are surfacing.
+    phase_calculation_method says which signal assigned which dives.
   phase_vocabulary: https://github.com/OceanGlidersCommunity/OG-format-user-manual/blob/main/vocabularyCollection/phase.md
   units: '1'
 AD2CP_PRES:
