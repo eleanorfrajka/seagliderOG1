@@ -1246,6 +1246,10 @@ def convert(
 
     ds_og1 = xr.concat(processed_datasets, dim="N_MEASUREMENTS")
     ds_og1 = ds_og1.sortby("TIME")
+    # Drop a GPS fix re-logged at a dive boundary (dive N's end fix == dive N+1's start fix):
+    # the two copies only meet here, after the dives are joined. Before PHASE/profiles so they
+    # see one data point per fix.
+    ds_og1 = _dedup_boundary_gps(ds_og1)
 
     # TEOS-10 variables OG1 names that the basestation did not supply (SA, CT, POTDENS0, and
     # PSAL from conductivity when salinity is absent); one pass on the concatenated data.
@@ -2094,7 +2098,7 @@ def process_dataset(
             - Converts units in the dataset (e.g., cm/s to m/s) where possible.
             - Converts QC flags to int8.
         3. Adds new variables:
-            - Adds GPS info as LATITUDE_GPS, LONGITUDE_GPS, and TIME_GPS (increasing the length of N_MEASUREMENTS).
+            - Adds GPS info as LATITUDE_GPS, LONGITUDE_GPS, and TIME_GPS onto each fix's existing data point (one data point per fix; no duplicate timestamps).
             - Adds the divenum as a variable of length N_MEASUREMENTS.
             - Adds the PROFILE_NUMBER (odd for dives, even for ascents).
             - Adds PHASE and PHASE_QC from the state table, G&C events, GPS fixes or pressure (see tools.add_phase).
@@ -2424,86 +2428,266 @@ def extract_variables(ds: xr.Dataset) -> tuple[xr.Dataset, xr.Dataset, xr.Datase
     return sg_cal, dc_log, dc_other
 
 
-def add_gps_info_to_dataset(ds: xr.Dataset, gps_ds: xr.Dataset) -> xr.Dataset:
-    """Add GPS information (LATITUDE_GPS, LONGITUDE_GPS, TIME_GPS) to the dataset.
+def _missing_scalar(value: object) -> bool:
+    """Return True when ``value`` is a NaN float or a NaT datetime (a missing cell)."""
+    if isinstance(value, np.datetime64):
+        return bool(np.isnat(value))
+    if isinstance(value, float | np.floating):
+        return bool(np.isnan(value))
+    return False
 
-    The GPS values will be included within the N_MEASUREMENTS dimension, with non-NaN values
-    only when GPS information is available. The dataset will be sorted by TIME.
+
+def _carries_only(ds: xr.Dataset, later: int, kept: int) -> bool:
+    """Return True when data point ``later`` carries nothing beyond data point ``kept``.
+
+    Every variable on ``N_MEASUREMENTS`` is either missing at ``later`` or equal to ``kept``
+    (``dive_number`` excepted, since the two copies belong to adjacent dives). Used to confirm
+    a re-logged boundary GPS fix can be dropped without losing any other data.
+    """
+    for name, var in ds.variables.items():
+        if var.dims != ("N_MEASUREMENTS",) or name == "dive_number":
+            continue
+        values = var.values
+        vi, vj = values[later], values[kept]
+        if _missing_scalar(vi) or vi == vj:
+            continue
+        return False
+    return True
+
+
+def _dedup_boundary_gps(ds: xr.Dataset) -> xr.Dataset:
+    """Drop a GPS fix re-logged at a dive boundary (the same fix in two adjacent dive files).
+
+    The end-of-dive-N surfacing fix is written again as dive N+1's start fix, so after the
+    mission concat the two copies sit at the same ``TIME`` with the same position. The earlier
+    copy (dive N's, which owns the surfacing) is kept and the later dropped. Only GPS-fix data
+    points (finite ``TIME_GPS``) that tie on ``TIME`` with equal ``LATITUDE_GPS`` and
+    ``LONGITUDE_GPS`` are removed; a fix sharing a time with a real sample, or distinct fixes,
+    are left. Within-dive exact repeats are already dropped earlier, in the merge.
+
+    Each dropped fix is recorded in the ``conversion_dropped_gps_fixes`` global (JSON list of
+    ``{time, dive}``, ``dive`` being the later dive it was removed from), so the phase page can
+    still draw that dive's leading surface fix even though its own data no longer carries it.
 
     Parameters
     ----------
     ds : xarray.Dataset
-        The dataset with renamed dimensions and variables, representing the main data.
-    gps_ds : xarray.Dataset
-        The dataset containing GPS information, typically extracted from the original
-        basestation dataset.
+        The concatenated mission dataset, sorted by ``TIME``.
 
     Returns
     -------
     xarray.Dataset
-        The updated dataset with added GPS information. This includes values for
-        LATITUDE_GPS, LONGITUDE_GPS, and TIME_GPS only when GPS information is available.
+        ``ds`` with a re-logged boundary fix removed, or unchanged when there is none.
+    """
+    if "TIME_GPS" not in ds.variables:
+        return ds
+    t = ds["TIME"].values.astype("datetime64[ns]").astype("int64")
+    is_fix = ~np.isnat(ds["TIME_GPS"].values)
+    lat = np.asarray(ds["LATITUDE_GPS"].values, dtype="float64")
+    lon = np.asarray(ds["LONGITUDE_GPS"].values, dtype="float64")
+    # A later GPS fix that ties on TIME with the previous one and repeats its position is a
+    # boundary copy. Adjacent comparison is enough: the per-dive merge already puts everything
+    # at one second onto one data point, so only the two cross-dive copies tie at a boundary.
+    candidate = np.zeros(t.size, dtype=bool)
+    candidate[1:] = (
+        (t[1:] == t[:-1])
+        & is_fix[1:]
+        & is_fix[:-1]
+        & (lat[1:] == lat[:-1])
+        & (lon[1:] == lon[:-1])
+    )
+    if not candidate.any():
+        return ds
+    # Drop a candidate only when its data point carries nothing but the repeated fix, so the
+    # drop loses nothing; otherwise keep both and warn (a duplicate timestamp then remains).
+    times_ns = ds["TIME"].values.astype("datetime64[ns]")
+    dive = ds["dive_number"].values if "dive_number" in ds.variables else None
+    drop = np.zeros(t.size, dtype=bool)
+    records = []
+    for i in np.flatnonzero(candidate):
+        if not _carries_only(ds, int(i), int(i) - 1):
+            _log.warning(
+                "GPS fix at %s is re-logged at a dive boundary but its data point carries "
+                "more than the fix; keeping both (a duplicate timestamp remains).",
+                np.datetime_as_string(times_ns[i], unit="s"),
+            )
+            continue
+        drop[i] = True
+        records.append(
+            {
+                "time": str(np.datetime_as_string(times_ns[i], unit="ns")),
+                "dive": int(dive[i])
+                if dive is not None and np.isfinite(dive[i])
+                else None,
+            }
+        )
+    if not drop.any():
+        return ds
+    _log.info("Dropped %d GPS fix(es) re-logged at a dive boundary.", int(drop.sum()))
+    ds = ds.isel(N_MEASUREMENTS=~drop)
+    ds.attrs["conversion_dropped_gps_fixes"] = json.dumps(records)
+    return ds
 
-    Notes
-    -----
-    - The dataset is sorted by TIME (or ctd_time from the original basestation dataset).
-    - If the data are not sorted by time, there may be unintended consequences.
-    - The function assumes that the GPS dataset contains variables `log_gps_lon`,
-      `log_gps_lat`, and `log_gps_time` for longitude, latitude, and time respectively.
-    - The function uses the `sg_data_point` dimension as defined in the OG1 vocabulary.
+
+def add_gps_info_to_dataset(ds: xr.Dataset, gps_ds: xr.Dataset) -> xr.Dataset:
+    """Attach each GPS fix's position and time to its existing data point.
+
+    The ``gps_info`` records are already on the shared ``TIME`` axis: the merge folds each
+    fix onto ``N_MEASUREMENTS`` (``gps_info`` maps to ``log_gps_time`` in the time-variable
+    map), carrying the raw ``log_gps_*`` fields. This writes the OG1 ``LATITUDE_GPS``,
+    ``LONGITUDE_GPS`` and ``TIME_GPS`` onto that same data point, and fills the fix's surface
+    ``LATITUDE``/``LONGITUDE`` and ``DEPTH`` (0 m, surface) where they are NaN. It does not
+    append a second data point per fix.
+
+    Appending a copy per fix duplicated the fix ``TIME`` -- one gps_info data point carrying
+    ``log_gps_*`` and one appended copy carrying ``*_GPS`` at the same instant -- which left
+    ``TIME`` non-strictly-increasing and broke time-indexed reads (``sel(TIME=)``,
+    ``swap_dims``, resampling) on the non-unique index. One data point per fix removes the
+    duplicate while keeping every field: the engineering ``log_gps_*`` stay, and the OG1
+    ``*_GPS`` and the surface position/depth now sit on the same data point.
+
+    ``TIME_GPS`` is taken from the raw ``log_gps_time`` in ``gps_ds``, not from the merged
+    ``TIME``: :func:`merge_datasets_along_time` shifts a repeated timestamp by +0.5 s, so the
+    merged ``TIME`` of a shifted fix is a time the GPS never recorded. Taking the raw value
+    keeps ``TIME_GPS`` equal to its declared source; a shifted fix then reads 0.5 s before its
+    ``TIME``, which is the clock the GPS actually recorded.
+
+    Parameters
+    ----------
+    ds : xarray.Dataset
+        The merged dataset on ``N_MEASUREMENTS`` after dimension/variable renaming. Holds the
+        folded ``log_gps_lat``/``log_gps_lon`` and the ``LATITUDE``, ``LONGITUDE``, ``DEPTH``
+        and ``TIME`` coordinates.
+    gps_ds : xarray.Dataset
+        The ``gps_info`` split. Supplies the raw ``log_gps_time`` for ``TIME_GPS`` (the merged
+        axis has consumed and possibly shifted it) and is the call-site guard that the file
+        has GPS (``split_by_unique_dims`` raises earlier when it does not).
+
+    Returns
+    -------
+    xarray.Dataset
+        ``ds`` with ``LATITUDE_GPS``, ``LONGITUDE_GPS`` and ``TIME_GPS`` added and each fix's
+        ``LATITUDE``/``LONGITUDE``/``DEPTH`` filled where it was NaN. No data points are
+        appended, so ``TIME`` keeps the merge's order and gains no duplicate timestamps at the
+        fixes.
+
+    Raises
+    ------
+    ValueError
+        If ``log_gps_lat``/``log_gps_lon`` are absent from ``ds``, or are present but no fix
+        has both finite: the ``gps_info`` records did not fold onto ``TIME`` as expected, so
+        there is no data point to attach a fix to. Raised rather than falling back to
+        appending, which would silently reinstate the duplicate timestamps.
 
     """
-    # Set new dimension name
-    newdim = vocabularies.DIMENSION_RENAMES["sg_data_point"]
+    if "log_gps_lat" not in ds.variables or "log_gps_lon" not in ds.variables:
+        msg = (
+            "add_gps_info_to_dataset: 'log_gps_lat'/'log_gps_lon' are not on the merged "
+            "dataset, so the gps_info records did not fold onto the TIME axis; cannot place "
+            "GPS fixes."
+        )
+        raise ValueError(msg)
 
-    # Create a new dataset with GPS information
-    gps_ds = xr.Dataset(
-        {
-            "LONGITUDE": ([newdim], gps_ds["log_gps_lon"].values),
-        },
-        coords={
-            "LATITUDE": ([newdim], gps_ds["log_gps_lat"].values),
-            "TIME": ([newdim], gps_ds["log_gps_time"].values),
-            "DEPTH": ([newdim], np.full(len(gps_ds["log_gps_lat"]), 0)),
-        },
+    n = ds.sizes["N_MEASUREMENTS"]
+    lat = np.asarray(ds["log_gps_lat"].values, dtype="float64")
+    lon = np.asarray(ds["log_gps_lon"].values, dtype="float64")
+    # A fix data point has a finite latitude AND longitude; a partial fix (one missing) is not
+    # placed. Exact selection (LATITUDE_GPS is log_gps_lat), so no time-matching is needed.
+    mask = np.isfinite(lat) & np.isfinite(lon)
+    if not mask.any():
+        msg = (
+            "add_gps_info_to_dataset: log_gps_lat/log_gps_lon are on the dataset but no fix "
+            "has both finite; the gps_info merge produced no GPS data point to attach to."
+        )
+        raise ValueError(msg)
+
+    # The merge drops exact-duplicate records (a fix logged twice at one second); drop them from
+    # the raw gps_info records the same way, so the raw fix times line up one-to-one with the
+    # merged fix points. Without this the counts differ and TIME_GPS falls back to the merged
+    # (possibly shifted) time -- the provenance problem again.
+    (gps_dim,) = gps_ds["log_gps_lat"].dims
+    raw_exact = _pipeline._exact_duplicate_rows(gps_ds, gps_dim)
+    if raw_exact.any():
+        gps_ds = gps_ds.isel({gps_dim: ~raw_exact})
+
+    # TIME_GPS is the raw recorded fix clock, from the gps_info split, so the variable matches
+    # its declared source (log_gps_time). It is NOT the merged TIME: merge_datasets_along_time
+    # shifts a repeated timestamp by +0.5 s (_pipeline), so a shifted fix's merged TIME is a
+    # time the GPS never recorded. GPS fixes are seconds apart, so the shift never reorders
+    # them -- the fixes in TIME order on the axis line up with the raw fix times sorted
+    # ascending.
+    raw_lat = np.asarray(gps_ds["log_gps_lat"].values, dtype="float64")
+    raw_lon = np.asarray(gps_ds["log_gps_lon"].values, dtype="float64")
+    raw_keep = np.isfinite(raw_lat) & np.isfinite(raw_lon)
+    raw_times = np.sort(
+        np.asarray(gps_ds["log_gps_time"].values, dtype="datetime64[ns]")[raw_keep]
     )
-    gps_ds = gps_ds.set_coords("LONGITUDE")
+    fix_positions = np.flatnonzero(mask)
+    time_gps = np.full(n, np.datetime64("NaT", "ns"))
+    if fix_positions.size == raw_times.size:
+        time_gps[fix_positions] = raw_times
+    else:
+        # The merge did not fold the fixes one-to-one. Fall back to the merged TIME so TIME_GPS
+        # is still populated, and warn loudly: a count mismatch is a merge defect.
+        _log.warning(
+            "GPS fixes on the time axis (%d) differ from gps_info records (%d); TIME_GPS "
+            "falls back to the merged time axis (which the duplicate-timestamp shift may have "
+            "moved). The merge dropped or duplicated GPS records.",
+            fix_positions.size,
+            int(raw_times.size),
+        )
+        time_gps[mask] = np.asarray(ds["TIME"].values, dtype="datetime64[ns]")[mask]
 
-    gps_ds["LATITUDE_GPS"] = (
-        [newdim],
-        gps_ds.LATITUDE.values,
-        vocabularies.vocab_attrs["LATITUDE_GPS"],
+    # Fill the fix's surface position and depth onto its gps_info data point, but only where
+    # the merged value is NaN: a fix sharing a timestamp with a real sample must not have that
+    # sample's LATITUDE/LONGITUDE/DEPTH overwritten. On the merged point they are normally NaN
+    # (the old append path carried them on a separate point).
+    def _fill_nan(name: str, source: np.ndarray) -> xr.DataArray:
+        arr = np.array(ds[name].values, copy=True)
+        here = mask & np.isnan(arr)
+        arr[here] = source[here].astype(arr.dtype)
+        return ds[name].copy(data=arr)
+
+    ds = ds.assign_coords(
+        LATITUDE=_fill_nan("LATITUDE", lat),
+        LONGITUDE=_fill_nan("LONGITUDE", lon),
+        DEPTH=_fill_nan("DEPTH", np.zeros(n)),
+    )
+
+    # The OG1 GPS variables, finite only on the fix data points.
+    lat_gps = np.where(mask, lat, np.nan)
+    lon_gps = np.where(mask, lon, np.nan)
+
+    # dict(...) so setting the ledger attr below does not mutate the shared vocab table.
+    ds["LATITUDE_GPS"] = (
+        ["N_MEASUREMENTS"],
+        lat_gps,
+        dict(vocabularies.vocab_attrs["LATITUDE_GPS"]),
         {"dtype": ds["LATITUDE"].dtype},
     )
-    gps_ds["LONGITUDE_GPS"] = (
-        [newdim],
-        gps_ds.LONGITUDE.values,
-        vocabularies.vocab_attrs["LONGITUDE_GPS"],
+    ds["LONGITUDE_GPS"] = (
+        ["N_MEASUREMENTS"],
+        lon_gps,
+        dict(vocabularies.vocab_attrs["LONGITUDE_GPS"]),
         {"dtype": ds["LONGITUDE"].dtype},
     )
-    gps_ds["TIME_GPS"] = (
-        [newdim],
-        gps_ds.TIME.values,
-        vocabularies.vocab_attrs["TIME_GPS"],
+    ds["TIME_GPS"] = (
+        ["N_MEASUREMENTS"],
+        time_gps,
+        dict(vocabularies.vocab_attrs["TIME_GPS"]),
         {"dtype": ds["TIME"].dtype},
     )
     # Record each GPS variable's basestation source for the conversion ledger; the
     # transient attr is consumed into conversion_derived_variables before the file is
     # written (see convert) and never reaches the output.
-    gps_ds["LATITUDE_GPS"].attrs[_DERIVED_SOURCES_ATTR] = json.dumps(["log_gps_lat"])
-    gps_ds["LONGITUDE_GPS"].attrs[_DERIVED_SOURCES_ATTR] = json.dumps(["log_gps_lon"])
-    gps_ds["TIME_GPS"].attrs[_DERIVED_SOURCES_ATTR] = json.dumps(["log_gps_time"])
+    ds["LATITUDE_GPS"].attrs[_DERIVED_SOURCES_ATTR] = json.dumps(["log_gps_lat"])
+    ds["LONGITUDE_GPS"].attrs[_DERIVED_SOURCES_ATTR] = json.dumps(["log_gps_lon"])
+    ds["TIME_GPS"].attrs[_DERIVED_SOURCES_ATTR] = json.dumps(["log_gps_time"])
     # Their source dimension, as every merged variable carries, so they group with
     # gps_info. No original_name: a derived variable names its sources in the ledger.
     for name in ("LATITUDE_GPS", "LONGITUDE_GPS", "TIME_GPS"):
-        gps_ds[name].attrs["original_dimension"] = "gps_info"
-
-    # Concatenate ds and gps_ds
-    datasets = []
-    datasets.append(ds)
-    datasets.append(gps_ds)
-    ds_new = xr.concat(datasets, dim=newdim, data_vars="all")
-    return ds_new.sortby("TIME")
+        ds[name].attrs["original_dimension"] = "gps_info"
+    return ds
 
 
 ##-----------------------------------------------------------------------------------------
