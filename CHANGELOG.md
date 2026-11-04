@@ -56,6 +56,25 @@ old → new API table and output-format detail for the 0.1.0 break are in the mi
   `None Found`) are no longer written.
 - `sensors.<key>.calibration_date` in `mission.yaml` must be an ISO date (`YYYY-MM-DD`);
   `seagliderOG1 validate` reports anything else as an ERROR.
+- Variables passed through under their basestation names now take the canonical unit spellings
+  the OG1 variables use (`g/kg` → `g kg-1`, `kg/m^3` → `kg m-3`, `degrees_Celsius` →
+  `degree_Celsius`, `meters` → `m`); one in `cm/s` is converted to `m s-1` (values ×0.01, with
+  `original_units`, a `comment` and a `conversion_units` entry). The same applies to the scalars and
+  to OG1-named variables whose configuration gives no units (`PITCH`, `ROLL`, `HEADING` in
+  `degree`). Spellings the units table does not know are left as written, and a per-dive scalar
+  stored as text keeps units that would need its values converted. `glide_angle_gsm`, labelled
+  `cm/s` by basestation 2.8 and 2.10 but holding degrees, is relabelled `degree` like
+  `glide_angle`. `GLIDE_ANGLE` is now `degree`; the wave periods `seconds`; `DEPTH_Z` `m`.
+- The pre-0.1.0 names that warned or raised through 0.1.x and 0.2.x are removed, with the
+  `convertOG1` module; using one gives Python's ordinary `AttributeError` (`ImportError` for
+  `from ... import`). `plotters.show_*` no
+  longer accept a file path. The replacements are in *Migrating to 0.1.0*; the list is in
+  *Migrating to 0.3.0*.
+- No `SA` or `CT` in the output: files carry practical salinity (`PSAL`), as TEOS-10 recommends
+  archiving (SA depends on the gsw version's absolute-salinity-anomaly atlas). A basestation file's
+  `absolute_salinity` and `conservative_temperature`, renamed `SA`/`CT` in 0.2.0, pass through
+  under those names with the basestation's own attributes. `POTDENS0` is still derived (SA and CT computed on the way, not written).
+  Compute SA and CT with `gsw.SA_from_SP` and `gsw.CT_from_t` when needed.
 - The variable attribute `uri` is renamed `vocabulary`, OG1's name for it. Every link names a
   current term in NERC's identifier form (`http://vocab.nerc.ac.uk/collection/OG1/current/TEMP/`):
   the OG1 term wherever OG1 has one (`TIME`, `DOXY`, `CHLA`, the irradiance, backscatter and
@@ -77,9 +96,9 @@ old → new API table and output-format detail for the 0.1.0 break are in the mi
 - A phase page, `<id>_phase.html`, is written beside the conversion page (`process --report`,
   `report`): how `PHASE` was assigned, rows per phase, one dive from the middle of the
   mission, every dive's phase shares with its depth and duration, and pitch against dP/dt.
-- `SA`, `CT` and `POTDENS0` (TEOS-10, via gsw) are added when the basestation does not write them;
-  `PSAL` is computed from conductivity only when a file has no salinity. Each carries `sources` and
-  a `comment` naming the gsw function and version, and is listed in `conversion_derived_variables`.
+- `POTDENS0` (TEOS-10, via gsw) is added when the basestation does not write it; `PSAL` is
+  computed from conductivity only when a file has no salinity. Each carries `sources` and a
+  `comment` naming the gsw functions and version, and is listed in `conversion_derived_variables`.
   Files have had no `POTDENS0` since 0.2.0.
 - The conversion page's practical-salinity comparison adds salinity recomputed from `CNDC`, `TEMP`
   and `PRES`, showing the size of the basestation's salinity correction.
@@ -115,6 +134,9 @@ old → new API table and output-format detail for the 0.1.0 break are in the mi
 
 ### Fixed
 
+- `PROFILE_NUMBER` carries its `vocabulary` in the file (it was in the configuration but not
+  applied); `PROFILE_DIRECTION` and `SEGMENT_NUMBER` are in the configuration as OG1 variables,
+  so the conversion page and `seagliderOG1 list` treat them as OG1.
 - Every variable on `N_MEASUREMENTS`, `_QC` variables included, carries
   `coordinates = "TIME LONGITUDE LATITUDE DEPTH"` (OG1's coordinates in the manual's order,
   blank-separated as CF requires); the basestation's `"ctd_time longitude latitude ctd_depth"`,

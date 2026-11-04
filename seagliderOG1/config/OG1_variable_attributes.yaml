@@ -55,7 +55,7 @@ SENSOR_type_serialnumber:
   sensor_calibration_date: '2021-01-01'
 GLIDE_ANGLE:
   long_name: glide angle from hydrodynamic model
-  units: degrees
+  units: degree
   observation_type: calculated
   positive: east
   comment: Glide angle based on hdm
@@ -281,18 +281,6 @@ PSAL_RAW:
   valid_max: 40
   valid_min: 0
   vocabulary: http://vocab.nerc.ac.uk/collection/OG1/current/PSAL/
-SA:
-  long_name: Absolute salinity of the water body by CTD and computation using TEOS-10
-    algorithm
-  standard_name: sea_water_absolute_salinity
-  units: g kg-1
-  comment: Absolute salinity of the water body by CTD and computation using TEOS-10
-    algorithm
-  sources: CNDC, TEMP, PRES
-  observation_type: calculated
-  sensor: sensor_ctd
-  valid_max: 120
-  valid_min: 0
 TEMP:
   long_name: 'Temperature of the water body by CTD'
   observation_type: measured
@@ -319,12 +307,6 @@ THETA:
   valid_max: 42
   valid_min: -5
   vocabulary: http://vocab.nerc.ac.uk/collection/OG1/current/THETA/
-CT:
-  long_name: Conservative temperature
-  standard_name: sea_water_conservative_temperature
-  units: degree_Celsius
-  observation_type: calculated
-  sources: SA TEMP PRES
 POTDENS0:
   long_name: Potential density of water body at surface
   standard_name: sea_water_potential_density
@@ -369,6 +351,12 @@ PROFILE_NUMBER:
   long_name: Identifier of numbered profile within the dataset
   units: '1'
   vocabulary: http://vocab.nerc.ac.uk/collection/OG1/current/PROFILE_NUMBER/
+PROFILE_DIRECTION:
+  long_name: Vertical direction of profile
+  units: '1'
+SEGMENT_NUMBER:
+  long_name: Identifier of numbered segment within the dataset
+  units: '1'
 dive_number:
   long_name: dive number
   units: '1'
@@ -533,7 +521,7 @@ westward_displacement:
 mean_wave_period:
   long_name: mean wave period, from MOSE sensor
   sensor: sensor_wave
-  units: s
+  units: seconds
 maximum_wave_height:
   long_name: maximum wave height, from MOSE sensor
   sensor: sensor_wave
@@ -546,7 +534,7 @@ significant_wave_period:
   long_name: Zero-crossing period of waves (highest one third) {significant wave period
     Ts} on the water body
   sensor: sensor_wave
-  units: s
+  units: seconds
   vocabulary: http://vocab.nerc.ac.uk/collection/P01/current/GTZHZZ01/
 significant_wave_height:
   long_name: Significant wave height of waves {Hs} on the water body

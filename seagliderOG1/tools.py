@@ -137,7 +137,13 @@ def add_profiles(ds: xr.Dataset) -> xr.Dataset:
         ("PROFILE_DIRECTION", direction, _phase.PROFILE_DIRECTION_ATTRS, 0),
         ("SEGMENT_NUMBER", segment, _phase.SEGMENT_NUMBER_ATTRS, _phase.NUMBER_FILL),
     ):
-        ds[name] = (["N_MEASUREMENTS"], values, dict(attrs))
+        # The OG1 attributes from the configuration (long_name, units, vocabulary), then the
+        # OG1 calculation-method text.
+        ds[name] = (
+            ["N_MEASUREMENTS"],
+            values,
+            {**vocabularies.vocab_attrs.get(name, {}), **attrs},
+        )
         ds[name].encoding["_FillValue"] = values.dtype.type(fill)
     return ds
 
@@ -173,7 +179,7 @@ def add_depth(ds: xr.Dataset) -> xr.Dataset:
     # Assign the calculated depth to a new variable in the dataset
 
     ds["DEPTH_Z"].attrs = {
-        "units": "meters",
+        "units": "m",
         "positive": "up",
         "standard_name": "depth",
         "comment": "Depth calculated from pressure using gsw library, positive up.",
@@ -326,47 +332,3 @@ def encode_times_og1(ds: xr.Dataset) -> xr.Dataset:
                 ds[var_name].attrs["units"] = OG1_TIME_UNITS
                 ds[var_name].attrs["calendar"] = OG1_TIME_CALENDAR
     return ds
-
-
-# ===============================================================================
-# Unused functions
-# ===============================================================================
-
-
-# --- deprecated v0.0.2 names (removed in 0.3.0; see seagliderOG1._deprecated) ----------
-from seagliderOG1 import _deprecated  # noqa: E402  # shims follow the definitions above
-
-calc_Z = _deprecated._renamed(add_depth, "tools.calc_Z", "tools.add_depth")
-assign_phase = _deprecated._renamed(add_phase, "tools.assign_phase", "tools.add_phase")
-
-# The three unit helpers now resolve through the units view (vocabularies.UNITS); the ad-hoc
-# unit tables they used are gone. Kept as warning shims for one release (removed 0.3.0).
-reformat_units_str = _deprecated.reformat_units_str
-reformat_units_var = _deprecated.reformat_units_var
-convert_units_var = _deprecated.convert_units_var
-
-_REMOVED_TOOLS = {
-    "OG1_name_mapping": (
-        "the basestation -> OG1 name mapping is built inside seagliderOG1.convert; "
-        "'seagliderOG1 inspect --conversion FILE.nc' prints what was renamed."
-    ),
-    "print_OG1_mapping_summary": (
-        "the mapping is built inside seagliderOG1.convert; "
-        "'seagliderOG1 inspect --conversion FILE.nc' prints what was renamed."
-    ),
-}
-_REMOVED_TOOLS.update(
-    dict.fromkeys(
-        (
-            "og1_name_mapping",
-            "gather_sensor_info",
-            "add_sensor_to_dataset",
-            "merge_datasets_along_time",
-            "extract_scalar_parameters",
-            "add_scalar_parameters",
-            "set_best_dtype",
-        ),
-        "a conversion-pipeline internal, private since 0.1.0; call seagliderOG1.convert.",
-    )
-)
-_deprecated.install_removed(globals(), _REMOVED_TOOLS)
