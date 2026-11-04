@@ -56,6 +56,21 @@ old → new API table and output-format detail for the 0.1.0 break are in the mi
   `None Found`) are no longer written.
 - `sensors.<key>.calibration_date` in `mission.yaml` must be an ISO date (`YYYY-MM-DD`);
   `seagliderOG1 validate` reports anything else as an ERROR.
+- The variable attribute `uri` is renamed `vocabulary`, OG1's name for it. Every link names a
+  current term in NERC's identifier form (`http://vocab.nerc.ac.uk/collection/OG1/current/TEMP/`):
+  the OG1 term wherever OG1 has one (`TIME`, `DOXY`, `CHLA`, the irradiance, backscatter and
+  attitude variables moved from P02; `TEMP_OXYGEN` → `TEMPDOXY`; `LATITUDE_GPS`/`LONGITUDE_GPS` →
+  `LAT_GPS`/`LON_GPS`), P01 only where OG1 has none. Twelve links that did not resolve are fixed,
+  `SA`'s link (no such OG1 term) is removed, and `DEPTH`, `PHASE`, `PROFILE_NUMBER` and
+  `SOUND_VELOCITY` (`SOUNDVEL`) gain one. Read `vocabulary` instead of `uri`.
+- `standard_name` is a current CF standard name on every variable: `CHLA` is
+  `mass_concentration_of_chlorophyll_a_in_sea_water` (was the deprecated
+  `concentration_of_chlorophyll_in_sea_water`), `OXYSAT` is
+  `fractional_saturation_of_oxygen_in_sea_water`; the names that are not CF are removed from
+  `ED380`, `ED490`, `GLIDER_HORZ_VELO_MODEL`, `GLIDER_VERT_VELO_MODEL`,
+  `GLIDER_VERT_VELO_PRESSURE` and `VERT_CURR_MODEL`.
+- The unused `HUMIDITY`, `PRESSURE_AIR`, `TEMP_AIR`, `WIND_SPEED` and `WIND_DIRECTION` entries
+  are removed from the variable attributes (no basestation variable maps to them).
 
 ### Added
 
@@ -91,9 +106,26 @@ old → new API table and output-format detail for the 0.1.0 break are in the mi
 - `tests/data/calibcomm_answers.csv` (50 comments from 13 gliders, basestation 2.8, 2.10 and 3.0.6) and
   `scripts/collect_calibcomm.py`; tests that read the out-of-repo dev pack run when
   `SEAGLIDEROG1_DEV_DATA` is set.
+- Offline copies of the NERC OG1 collection, the P01 terms in use and the CF standard-name table
+  (`tests/data/vocabularies/`, written by `scripts/fetch_vocabularies.py`); the tests check every
+  `vocabulary` link and `standard_name` against them without the network.
+- Docs page "Variable vocabulary": every variable's `vocabulary` term (with its label) and
+  `standard_name`, and the variables without a term, written from the configuration on every
+  docs build.
 
 ### Fixed
 
+- Every variable on `N_MEASUREMENTS`, `_QC` variables included, carries
+  `coordinates = "TIME LONGITUDE LATITUDE DEPTH"` (OG1's coordinates in the manual's order,
+  blank-separated as CF requires); the basestation's `"ctd_time longitude latitude ctd_depth"`,
+  which named variables the OG1 file does not have, no longer survives on the `_QC` and a few
+  other variables.
+- `TEMP_OXYGEN`'s `long_name` is OG1's `TEMPDOXY` label ("Sea temperature from oxygen sensor
+  ITS-90 scale"); it said "by CTD".
+- Placeholder `long_name`s are replaced: `TEMP_FREQ` and `COND_FREQ` are the frequencies reported
+  by the CTD temperature and conductivity sensors; `O2_FREQ` takes OG1's `FREQDOXY` label and
+  term; `BBP470_REF` and `BBP700_REF` name the WET Labs BB2F `blueRef`/`redRef` as reported by
+  the instrument (they read "What is this variable?" and "maybe dark counts").
 - Basestation 2.10 files (`gc_state_secs` written as seconds from the dive start) no longer put rows
   in January 1970; the output name and `time_coverage_start` take the dive's real start.
 - A current-year calibration date is no longer rejected, and the same comment no longer parses
